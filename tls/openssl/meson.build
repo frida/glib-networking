@@ -54,7 +54,16 @@ if build_static
     install: true,
     install_dir: gio_module_dir,
   )
-  pkg.generate(module)
+  pkg.generate(filebase: 'gioopenssl',
+    name: 'gioopenssl',
+    version: meson.project_version(),
+    description: 'Network-related GIO module for GLib using OpenSSL',
+    requires: ['glib-2.0', 'gobject-2.0', 'gio-2.0'],
+    libraries: [gioopenssl_lib],
+  )
+  install_headers(['gioopenssl.h'])
+  install_data(['gioopenssl.vapi'],
+    install_dir: join_paths(get_option('datadir'), 'vala', 'vapi'))
 
   gioopenssl_dep = declare_dependency(link_with: gioopenssl_lib)
   meson.override_dependency('gioopenssl', gioopenssl_dep)
