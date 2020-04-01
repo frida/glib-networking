@@ -32,6 +32,15 @@ common_flags = [
   '-DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_56'
 ]
 
+ndebug = get_option('b_ndebug')
+if ndebug == 'true' or (ndebug == 'if-release' and not get_option('debug'))
+  common_flags += [
+    '-DG_DISABLE_CAST_CHECKS',
+    '-DG_DISABLE_ASSERT',
+    '-DG_DISABLE_CHECKS'
+  ]
+endif
+
 add_project_arguments(common_flags, language: 'c')
 
 cflags = cc.get_supported_arguments(['-Werror=declaration-after-statement',
