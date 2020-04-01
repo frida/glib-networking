@@ -57,6 +57,15 @@ gobject_dep = dependency('gio-2.0',
 gmodule_dep = dependency('gmodule-2.0',
   fallback: ['glib', 'libgmodule_dep'])
 
+gio_supports_plugins = cc.compiles('''
+#include <glib.h>
+#ifdef GIO_STATIC_COMPILATION
+# error GIO does not support plugins
+#endif
+  ''',
+  name: 'GIO supports plugins',
+  dependencies: [gio_dep])
+
 if glib_dep.type_name() == 'internal'
   glib_proj = subproject('glib')
   gio_module_dir = glib_proj.get_variable('glib_giomodulesdir')
@@ -182,10 +191,12 @@ endif
 
 subdir('tls/tests')
 
-# Will automatically pick it up from the cross file if defined
-gio_querymodules = find_program('gio-querymodules', required : false)
-if gio_querymodules.found()
-  meson.add_install_script('meson_post_install.py', gio_querymodules.path(), gio_module_dir)
+if gio_supports_plugins
+  # Will automatically pick it up from the cross file if defined
+  gio_querymodules = find_program('gio-querymodules', required : false)
+  if gio_querymodules.found()
+    meson.add_install_script('meson_post_install.py', gio_querymodules.path(), gio_module_dir)
+  endif
 endif
 
 output = '\n\n'
