@@ -33,6 +33,15 @@ common_flags = [
   '-DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_70'
 ]
 
+ndebug = get_option('b_ndebug')
+if ndebug == 'true' or (ndebug == 'if-release' and not get_option('debug'))
+  common_flags += [
+    '-DG_DISABLE_CAST_CHECKS',
+    '-DG_DISABLE_ASSERT',
+    '-DG_DISABLE_CHECKS'
+  ]
+endif
+
 build_static = get_option('static_modules') or get_option('default_library') != 'shared'
 build_shared = get_option('default_library') != 'static'
 if build_static and build_shared and (host_system == 'windows' or host_system == 'cygwin')
