@@ -35,6 +35,7 @@
 #include "gtlscertificate-openssl.h"
 #include "gtlsdatabase-openssl.h"
 #include "gtlsbio.h"
+#include "gtlslog.h"
 
 #include <glib/gi18n-lib.h>
 
@@ -137,13 +138,18 @@ end_openssl_io (GTlsConnectionOpenssl  *openssl,
 
   if (g_tls_connection_base_is_handshaking (tls) && !g_tls_connection_base_ever_handshaked (tls))
     {
-      if (reason == SSL_R_BAD_PACKET_LENGTH ||
-          reason == SSL_R_UNKNOWN_ALERT_TYPE ||
-          reason == SSL_R_DECRYPTION_FAILED ||
-          reason == SSL_R_DECRYPTION_FAILED_OR_BAD_RECORD_MAC ||
-          reason == SSL_R_BAD_PROTOCOL_VERSION_NUMBER ||
-          reason == SSL_R_SSLV3_ALERT_HANDSHAKE_FAILURE ||
-          reason == SSL_R_UNKNOWN_PROTOCOL)
+      if (reason == SSL_R_SSLV3_ALERT_HANDSHAKE_FAILURE && my_error)
+        {
+          g_propagate_error (error, my_error);
+          return G_TLS_CONNECTION_BASE_ERROR;
+        }
+      else if (reason == SSL_R_BAD_PACKET_LENGTH ||
+               reason == SSL_R_UNKNOWN_ALERT_TYPE ||
+               reason == SSL_R_DECRYPTION_FAILED ||
+               reason == SSL_R_DECRYPTION_FAILED_OR_BAD_RECORD_MAC ||
+               reason == SSL_R_BAD_PROTOCOL_VERSION_NUMBER ||
+               reason == SSL_R_SSLV3_ALERT_HANDSHAKE_FAILURE ||
+               reason == SSL_R_UNKNOWN_PROTOCOL)
         {
           g_clear_error (&my_error);
           g_set_error (error, G_TLS_ERROR, G_TLS_ERROR_NOT_TLS,
@@ -200,13 +206,180 @@ end_openssl_io (GTlsConnectionOpenssl  *openssl,
       return G_TLS_CONNECTION_BASE_ERROR;
     }
 
+  if (reason == SSL_R_NO_RENEGOTIATION)
+    {
+      g_clear_error (&my_error);
+      g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
+                           _("Secure renegotiation is disabled"));
+      return G_TLS_CONNECTION_BASE_REHANDSHAKE;
+    }
+
   if (my_error)
     g_propagate_error (error, my_error);
+  else
+    /* FIXME: this is just for debug */
+    g_message ("end_openssl_io %s: %d, %d, %d", G_IS_TLS_CLIENT_CONNECTION (openssl) ? "client" : "server", err_code, err_lib, reason);
 
-  if (error && !*error)
+  if (ret == 0 && err == 0 && err_lib == 0 && err_code == SSL_ERROR_SYSCALL
+      && (direction == G_IO_IN || direction == G_IO_OUT))
+    {
+      /* SSL_ERROR_SYSCALL usually means we have no bloody idea what has happened
+       * but when ret for read or write is 0 and all others error codes as well
+       * - this is normally Early EOF condition
+       */
+      if (!g_tls_connection_get_require_close_notify (G_TLS_CONNECTION (openssl)))
+        return G_TLS_CONNECTION_BASE_OK;
+
+      if (error && !*error)
+        *error = g_error_new (G_TLS_ERROR, G_TLS_ERROR_EOF, _("%s: The connection is broken"), err_prefix);
+    }
+  else if (error && !*error)
     *error = g_error_new (G_TLS_ERROR, G_TLS_ERROR_MISC, "%s: %s", err_prefix, err_str);
 
   return G_TLS_CONNECTION_BASE_ERROR;
+}
+
+static int
+_openssl_alpn_select_cb (SSL                  *ssl,
+                         const unsigned char **out,
+                         unsigned char        *outlen,
+                         const unsigned char  *in,
+                         unsigned int          inlen,
+                         void                 *arg)
+{
+  GTlsConnectionBase *tls = arg;
+  int ret = SSL_TLSEXT_ERR_NOACK;
+  gchar **advertised_protocols = NULL;
+  gchar *logbuf;
+
+  logbuf = g_strndup ((const gchar *)in, inlen);
+  g_tls_log_debug (tls, "ALPN their protocols: %s", logbuf);
+  g_free (logbuf);
+
+  g_object_get (G_OBJECT (tls),
+                "advertised-protocols", &advertised_protocols,
+                NULL);
+
+  if (!advertised_protocols)
+    return ret;
+
+  if (g_strv_length (advertised_protocols) > 0)
+    {
+      GByteArray *protocols = g_byte_array_new ();
+      int i;
+      guint8 slen = 0;
+      guint8 *spd = NULL;
+
+      for (i = 0; advertised_protocols[i]; i++)
+        {
+          guint8 len = strlen (advertised_protocols[i]);
+          g_byte_array_append (protocols, &len, 1);
+          g_byte_array_append (protocols,
+                               (guint8 *)advertised_protocols[i],
+                               len);
+        }
+      logbuf = g_strndup ((const gchar *)protocols->data, protocols->len);
+      g_tls_log_debug (tls, "ALPN our protocols: %s", logbuf);
+      g_free (logbuf);
+
+      /* pointer to memory inside in[0..inlen] is returned on success
+       * pointer to protocols->data is returned on failure */
+      ret = SSL_select_next_proto (&spd, &slen,
+                                   in, inlen,
+                                   protocols->data, protocols->len);
+      if (ret == OPENSSL_NPN_NEGOTIATED)
+        {
+          logbuf = g_strndup ((const gchar *)spd, slen);
+          g_tls_log_debug (tls, "ALPN selected protocol %s", logbuf);
+          g_free (logbuf);
+
+          ret = SSL_TLSEXT_ERR_OK;
+          *out = spd;
+          *outlen = slen;
+        }
+      else
+        {
+          g_tls_log_debug (tls, "ALPN no matching protocol");
+          ret = SSL_TLSEXT_ERR_NOACK;
+        }
+
+      g_byte_array_unref (protocols);
+    }
+
+  g_strfreev (advertised_protocols);
+  return ret;
+}
+
+static void
+g_tls_connection_openssl_prepare_handshake (GTlsConnectionBase  *tls,
+                                            gchar              **advertised_protocols)
+{
+  SSL *ssl;
+
+  if (!advertised_protocols)
+    return;
+
+  ssl = g_tls_connection_openssl_get_ssl (G_TLS_CONNECTION_OPENSSL (tls));
+
+  if (G_IS_TLS_SERVER_CONNECTION (tls))
+    {
+      SSL_CTX *ctx = SSL_get_SSL_CTX(ssl);
+
+      g_tls_log_debug (tls, "Setting ALPN Callback on %p", ctx);
+      SSL_CTX_set_alpn_select_cb (ctx, _openssl_alpn_select_cb, tls);
+
+      return;
+    }
+
+  if (g_strv_length (advertised_protocols) > 0)
+    {
+      GByteArray *protocols = g_byte_array_new ();
+      int ret, i;
+
+      for (i = 0; advertised_protocols[i]; i++)
+        {
+          guint8 len = strlen (advertised_protocols[i]);
+          g_byte_array_append (protocols, &len, 1);
+          g_byte_array_append (protocols, (guint8 *)advertised_protocols[i], len);
+        }
+      ret = SSL_set_alpn_protos (ssl, protocols->data, protocols->len);
+      if (ret)
+        g_tls_log_debug (tls, "Error setting ALPN protocols: %d", ret);
+      else
+        {
+          gchar *logbuf = g_strndup ((const gchar *)protocols->data, protocols->len);
+
+          g_tls_log_debug (tls, "Setting ALPN protocols to %s", logbuf);
+          g_free (logbuf);
+        }
+      g_byte_array_unref (protocols);
+    }
+}
+
+static void
+g_tls_connection_openssl_complete_handshake (GTlsConnectionBase  *tls,
+                                             gboolean             handshake_succeeded,
+                                             gchar              **negotiated_protocol,
+                                             GError             **error)
+{
+  SSL *ssl;
+  unsigned int len = 0;
+  const unsigned char *data = NULL;
+
+  if (!handshake_succeeded)
+    return;
+
+  ssl = g_tls_connection_openssl_get_ssl (G_TLS_CONNECTION_OPENSSL (tls));
+
+  SSL_get0_alpn_selected (ssl, &data, &len);
+
+  g_tls_log_debug (tls, "negotiated ALPN protocols: [%d]%p", len, data);
+
+  if (data && len > 0)
+    {
+      g_assert (!*negotiated_protocol);
+      *negotiated_protocol = g_strndup ((gchar *)data, len);
+    }
 }
 
 #define BEGIN_OPENSSL_IO(openssl, direction, timeout, cancellable)          \
@@ -229,7 +402,7 @@ g_tls_connection_openssl_handshake_thread_request_rehandshake (GTlsConnectionBas
   GTlsConnectionOpenssl *openssl;
   GTlsConnectionBaseStatus status;
   SSL *ssl;
-  int ret;
+  int ret = 1; /* always look on the bright side of life */
 
   /* On a client-side connection, SSL_renegotiate() itself will start
    * a rehandshake, so we only need to do something special here for
@@ -243,7 +416,13 @@ g_tls_connection_openssl_handshake_thread_request_rehandshake (GTlsConnectionBas
   ssl = g_tls_connection_openssl_get_ssl (openssl);
 
   BEGIN_OPENSSL_IO (openssl, G_IO_IN | G_IO_OUT, timeout, cancellable);
-  ret = SSL_renegotiate (ssl);
+  if (SSL_version(ssl) >= TLS1_3_VERSION)
+    ret = SSL_key_update (ssl, SSL_KEY_UPDATE_REQUESTED);
+  else if (SSL_get_secure_renegotiation_support (ssl) && !(SSL_get_options(ssl) & SSL_OP_NO_RENEGOTIATION))
+    /* remote and local peers both can rehandshake */
+    ret = SSL_renegotiate (ssl);
+  else
+    g_tls_log_debug (tls, "Secure renegotiation is not supported");
   END_OPENSSL_IO (openssl, G_IO_IN | G_IO_OUT, ret, timeout, status,
                   _("Error performing TLS handshake"), error);
 
@@ -279,6 +458,170 @@ g_tls_connection_openssl_retrieve_peer_certificate (GTlsConnectionBase *tls)
   return G_TLS_CERTIFICATE (chain);
 }
 
+static gboolean
+openssl_get_binding_tls_unique (GTlsConnectionOpenssl  *tls,
+                                GByteArray             *data,
+                                GError                **error)
+{
+  SSL *ssl = g_tls_connection_openssl_get_ssl (tls);
+  gboolean is_client = G_IS_TLS_CLIENT_CONNECTION (tls);
+  gboolean resumed = SSL_session_reused (ssl);
+  size_t len = 64;
+
+  /* This is a drill */
+  if (!data)
+    return TRUE;
+
+  do {
+    g_byte_array_set_size (data, len);
+    if ((resumed && is_client) || (!resumed && !is_client))
+      len = SSL_get_peer_finished (ssl, data->data, data->len);
+    else
+      len = SSL_get_finished (ssl, data->data, data->len);
+  } while (len > data->len);
+
+  if (len > 0)
+    {
+      g_byte_array_set_size (data, len);
+      return TRUE;
+    }
+  g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_AVAILABLE,
+               _("Channel binding data tls-unique is not available"));
+  return FALSE;
+}
+
+static gboolean
+openssl_get_binding_tls_server_end_point (GTlsConnectionOpenssl  *tls,
+                                          GByteArray             *data,
+                                          GError                **error)
+{
+  SSL *ssl = g_tls_connection_openssl_get_ssl (tls);
+  gboolean is_client = G_IS_TLS_CLIENT_CONNECTION (tls);
+  int algo_nid;
+  const EVP_MD *algo = NULL;
+  X509 *crt;
+
+  if (is_client)
+    crt = SSL_get_peer_certificate (ssl);
+  else
+    crt = SSL_get_certificate (ssl);
+
+  if (!crt)
+    {
+      g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_AVAILABLE,
+                   _("X.509 Certificate is not available on the connection"));
+      return FALSE;
+    }
+
+  if (!OBJ_find_sigid_algs (X509_get_signature_nid (crt), &algo_nid, NULL))
+    {
+      X509_free (crt);
+      g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_GENERAL_ERROR,
+                   _("Unable to obtain certificate signature algorithm"));
+      return FALSE;
+    }
+
+  /* This is a drill */
+  if (!data)
+    {
+      if (is_client)
+        X509_free (crt);
+      return TRUE;
+    }
+
+  switch (algo_nid)
+    {
+    case NID_md5:
+    case NID_sha1:
+      algo_nid = NID_sha256;
+      break;
+    case NID_md5_sha1:
+      g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_SUPPORTED,
+                   _("Current X.509 certificate uses unknown or unsupported signature algorithm"));
+      if (is_client)
+        X509_free (crt);
+      return FALSE;
+    }
+
+  g_byte_array_set_size (data, EVP_MAX_MD_SIZE);
+  algo = EVP_get_digestbynid (algo_nid);
+  if (X509_digest (crt, algo, data->data, &(data->len)))
+    {
+      if (is_client)
+        X509_free (crt);
+      return TRUE;
+    }
+
+  if (is_client)
+    X509_free (crt);
+  g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_GENERAL_ERROR,
+               _("Failed to generate X.509 certificate digest"));
+  return FALSE;
+}
+
+#define RFC5705_LABEL_DATA "EXPORTER-Channel-Binding"
+#define RFC5705_LABEL_LEN 24
+static gboolean
+openssl_get_binding_tls_exporter (GTlsConnectionOpenssl  *tls,
+                                  GByteArray             *data,
+                                  GError                **error)
+{
+  SSL *ssl = g_tls_connection_openssl_get_ssl (tls);
+  size_t  ctx_len = 0;
+  guint8 *context = (guint8 *)"";
+  int ret;
+
+  if (!data)
+    return TRUE;
+
+  g_byte_array_set_size (data, 32);
+  ret = SSL_export_keying_material (ssl,
+                                    data->data, data->len,
+                                    RFC5705_LABEL_DATA, RFC5705_LABEL_LEN,
+                                    context, ctx_len,
+                                    1 /* use context */);
+
+  if (ret > 0)
+    return TRUE;
+
+  if (ret < 0)
+    g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_SUPPORTED,
+                 _("TLS Connection does not support TLS-Exporter feature"));
+  else
+    g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_GENERAL_ERROR,
+                 _("Unexpected error while exporting keying data"));
+
+  return FALSE;
+}
+
+static gboolean
+g_tls_connection_openssl_get_channel_binding_data (GTlsConnectionBase      *tls,
+                                                   GTlsChannelBindingType   type,
+                                                   GByteArray              *data,
+                                                   GError                 **error)
+{
+  GTlsConnectionOpenssl *openssl = G_TLS_CONNECTION_OPENSSL (tls);
+
+  /* XXX: remove the cast once public enum supports exporter */
+  switch ((int)type)
+    {
+    case G_TLS_CHANNEL_BINDING_TLS_UNIQUE:
+      return openssl_get_binding_tls_unique (openssl, data, error);
+      /* fall through */
+    case G_TLS_CHANNEL_BINDING_TLS_SERVER_END_POINT:
+      return openssl_get_binding_tls_server_end_point (openssl, data, error);
+      /* fall through */
+    case 100500:
+      return openssl_get_binding_tls_exporter (openssl, data, error);
+      /* fall through */
+    default:
+      /* Anyone to implement tls-unique-for-telnet? */
+      g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_IMPLEMENTED,
+                   _("Requested channel binding type is not implemented"));
+    }
+  return FALSE;
+}
+
 static GTlsConnectionBaseStatus
 g_tls_connection_openssl_handshake_thread_handshake (GTlsConnectionBase  *tls,
                                                      gint64               timeout,
@@ -300,7 +643,11 @@ g_tls_connection_openssl_handshake_thread_handshake (GTlsConnectionBase  *tls,
   if (ret > 0)
     {
       if (!g_tls_connection_base_handshake_thread_verify_certificate (G_TLS_CONNECTION_BASE (openssl)))
-        return G_TLS_CONNECTION_BASE_ERROR;
+        {
+          g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE,
+                               _("Unacceptable TLS certificate"));
+          return G_TLS_CONNECTION_BASE_ERROR;
+        }
     }
 
   return status;
@@ -496,10 +843,13 @@ g_tls_connection_openssl_class_init (GTlsConnectionOpensslClass *klass)
 
   object_class->finalize                                 = g_tls_connection_openssl_finalize;
 
+  base_class->prepare_handshake                          = g_tls_connection_openssl_prepare_handshake;
+  base_class->complete_handshake                         = g_tls_connection_openssl_complete_handshake;
   base_class->handshake_thread_safe_renegotiation_status = g_tls_connection_openssl_handshake_thread_safe_renegotiation_status;
   base_class->handshake_thread_request_rehandshake       = g_tls_connection_openssl_handshake_thread_request_rehandshake;
   base_class->handshake_thread_handshake                 = g_tls_connection_openssl_handshake_thread_handshake;
   base_class->retrieve_peer_certificate                  = g_tls_connection_openssl_retrieve_peer_certificate;
+  base_class->get_channel_binding_data                   = g_tls_connection_openssl_get_channel_binding_data;
   base_class->push_io                                    = g_tls_connection_openssl_push_io;
   base_class->pop_io                                     = g_tls_connection_openssl_pop_io;
   base_class->read_fn                                    = g_tls_connection_openssl_read;

@@ -1,6 +1,6 @@
 project(
   'glib-networking', 'c',
-  version: '2.64.1',
+  version: '2.66.0',
   license: 'LGPL2.1+',
   meson_version: '>= 0.50.0',
   default_options: ['c_std=c99']
@@ -32,15 +32,6 @@ common_flags = [
   '-DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_56'
 ]
 
-ndebug = get_option('b_ndebug')
-if ndebug == 'true' or (ndebug == 'if-release' and not get_option('debug'))
-  common_flags += [
-    '-DG_DISABLE_CAST_CHECKS',
-    '-DG_DISABLE_ASSERT',
-    '-DG_DISABLE_CHECKS'
-  ]
-endif
-
 add_project_arguments(common_flags, language: 'c')
 
 cflags = cc.get_supported_arguments(['-Werror=declaration-after-statement',
@@ -57,23 +48,14 @@ if host_system.contains('linux')
 endif
 
 # *** Check GLib GIO        ***
-glib_dep = dependency('glib-2.0', version: '>= 2.63.0',
+glib_dep = dependency('glib-2.0', version: '>= 2.65.1',
   fallback: ['glib', 'libglib_dep'])
 gio_dep = dependency('gio-2.0',
   fallback: ['glib', 'libgio_dep'])
-gobject_dep = dependency('gio-2.0',
+gobject_dep = dependency('gobject-2.0',
   fallback: ['glib', 'libgobject_dep'])
 gmodule_dep = dependency('gmodule-2.0',
   fallback: ['glib', 'libgmodule_dep'])
-
-gio_supports_plugins = cc.compiles('''
-#include <glib.h>
-#ifdef GIO_STATIC_COMPILATION
-# error GIO does not support plugins
-#endif
-  ''',
-  name: 'GIO supports plugins',
-  dependencies: [gio_dep])
 
 if glib_dep.type_name() == 'internal'
   glib_proj = subproject('glib')
@@ -114,6 +96,15 @@ else
     # so we check for it manually here in this case, if we can't find those files
     # Based on the CMake check for OpenSSL in CURL's CMakeLists.txt,
     # on which headers we should check for
+
+    # OpenSSL's MSVC NMake Makefiles prepends the library filenames with 'lib',
+    # so we must prepend the libraries with 'lib' on MSVC, except for the pre-1.1.x
+    # ssleay32.lib
+    openssl_lib_prefix = ''
+    if cc.get_argument_syntax() == 'msvc'
+      openssl_lib_prefix = 'lib'
+    endif
+
     openssl_headers = []
     foreach h : ['crypto.h', 'engine.h', 'err.h', 'pem.h',
                  'rsa.h', 'ssl.h', 'x509.h', 'rand.h', 'tls1.h']
@@ -124,11 +115,11 @@ else
     # so we need to look for the correct pair
 
     # Find either libcrypto.lib (1.1.x) or libeay32.lib (1.0.x or earlier) first
-    libcrypto_dep = cc.find_library('crypto', required: false)
+    libcrypto_dep = cc.find_library('@0@crypto'.format(openssl_lib_prefix), required: false)
     if libcrypto_dep.found()
-      libssl = 'ssl'
+      libssl = '@0@ssl'.format(openssl_lib_prefix)
     else
-      libcrypto_dep = cc.find_library('eay32', required: openssl_option)
+      libcrypto_dep = cc.find_library('@0@eay32'.format(openssl_lib_prefix), required: openssl_option)
       libssl = 'ssleay32'
     endif
 
@@ -200,12 +191,10 @@ endif
 
 subdir('tls/tests')
 
-if gio_supports_plugins
-  # Will automatically pick it up from the cross file if defined
-  gio_querymodules = find_program('gio-querymodules', required : false)
-  if gio_querymodules.found()
-    meson.add_install_script('meson_post_install.py', gio_querymodules.path(), gio_module_dir)
-  endif
+# Will automatically pick it up from the cross file if defined
+gio_querymodules = find_program('gio-querymodules', required : false)
+if gio_querymodules.found()
+  meson.add_install_script('meson_post_install.py', gio_querymodules.path(), gio_module_dir)
 endif
 
 output = '\n\n'

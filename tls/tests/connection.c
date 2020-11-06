@@ -135,6 +135,7 @@ teardown_connection (TestConnection *test, gconstpointer data)
       /* The outstanding accept_async will hold a ref on test->service,
        * which we want to wait for it to release if we're valgrinding.
        */
+      g_socket_listener_close (G_SOCKET_LISTENER (test->service));
       g_object_add_weak_pointer (G_OBJECT (test->service), (gpointer *)&test->service);
       g_object_unref (test->service);
       WAIT_UNTIL_UNSET (test->service);
@@ -1069,12 +1070,6 @@ static void
 test_client_auth_rehandshake (TestConnection *test,
                               gconstpointer   data)
 {
-#ifdef BACKEND_IS_OPENSSL
-  /* FIXME: this doesn't make sense, we should support safe renegotation */
-  g_test_skip ("the server avoids rehandshake to avoid the security problem CVE-2009-3555");
-  return;
-#endif
-
   test->rehandshake = TRUE;
   test_client_auth_connection (test, data);
 }
@@ -1195,11 +1190,6 @@ test_client_auth_fail_missing_client_private_key (TestConnection *test,
   GIOStream *connection;
   GError *error = NULL;
 
-#ifdef BACKEND_IS_OPENSSL
-  g_test_skip ("this new test does not work with openssl, more research needed");
-  return;
-#endif
-
   g_test_bug ("793712");
 
   test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
@@ -1225,13 +1215,24 @@ test_client_auth_fail_missing_client_private_key (TestConnection *test,
   /* All validation in this test */
   g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
                                                 G_TLS_CERTIFICATE_VALIDATE_ALL);
+#if BACKEND_IS_OPENSSL && defined(G_OS_WIN32)
+  test->ignore_client_close_error = TRUE;
+#endif
 
   read_test_data_async (test);
   g_main_loop_run (test->loop);
   wait_until_server_finished (test);
 
+#if BACKEND_IS_OPENSSL && defined(G_OS_WIN32)
+  test->ignore_client_close_error = FALSE;
+#endif
+
   g_assert_error (test->read_error, G_TLS_ERROR, G_TLS_ERROR_CERTIFICATE_REQUIRED);
+#if BACKEND_IS_OPENSSL
+  g_assert_error (test->server_error, G_TLS_ERROR, G_TLS_ERROR_CERTIFICATE_REQUIRED);
+#else
   g_assert_error (test->server_error, G_TLS_ERROR, G_TLS_ERROR_NOT_TLS);
+#endif
 }
 
 static void
@@ -1295,11 +1296,6 @@ test_client_auth_request_fail (TestConnection *test,
   GError *error = NULL;
   GTlsInteraction *interaction;
 
-#ifdef BACKEND_IS_OPENSSL
-  g_test_skip ("this new test does not work with openssl, more research needed");
-  return;
-#endif
-
   test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
   g_assert_no_error (error);
   g_assert_nonnull (test->database);
@@ -1336,6 +1332,7 @@ test_client_auth_request_fail (TestConnection *test,
    * as we expect, just not with the desired error.
    */
   if (!g_error_matches (test->read_error, G_TLS_ERROR, G_TLS_ERROR_NOT_TLS) &&
+      !g_error_matches (test->read_error, G_TLS_ERROR, G_TLS_ERROR_CERTIFICATE_REQUIRED) &&
       !g_error_matches (test->read_error, G_TLS_ERROR, G_TLS_ERROR_EOF))
     {
       /* G_FILE_ERROR_ACCES is the error returned by our mock interaction object
@@ -1787,11 +1784,6 @@ static void
 test_simultaneous_async_rehandshake (TestConnection *test,
                                      gconstpointer   data)
 {
-#ifdef BACKEND_IS_OPENSSL
-  g_test_skip ("this needs more research on openssl");
-  return;
-#endif
-
   test->rehandshake = TRUE;
   test_simultaneous_async (test, data);
 }
@@ -1886,11 +1878,6 @@ static void
 test_simultaneous_sync_rehandshake (TestConnection *test,
                                     gconstpointer   data)
 {
-#ifdef BACKEND_IS_OPENSSL
-  g_test_skip ("this needs more research on openssl");
-  return;
-#endif
-
   test->rehandshake = TRUE;
   test_simultaneous_sync (test, data);
 }
@@ -1946,11 +1933,6 @@ test_unclean_close_by_server (TestConnection *test,
   GTlsConnection *client_connection;
   gssize nread;
 
-#ifdef BACKEND_IS_OPENSSL
-  g_test_skip ("this new test does not work with openssl, more research needed");
-  return;
-#endif
-
   start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, HANDSHAKE_ONLY);
   client = g_socket_client_new ();
   g_socket_client_set_tls (client, TRUE);
@@ -1990,6 +1972,7 @@ test_unclean_close_by_server (TestConnection *test,
   g_clear_error (&test->read_error);
   g_clear_object (&test->service);
   g_clear_object (&test->server_connection);
+  g_clear_object (&test->client_connection);
   test->server_ever_handshaked = FALSE;
   start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, HANDSHAKE_ONLY);
 
@@ -2182,14 +2165,10 @@ test_garbage_database (TestConnection *test,
   GIOStream *connection;
   GError *error = NULL;
 
-#ifdef BACKEND_IS_OPENSSL
-  g_test_skip ("this is not yet passing with openssl");
-  return;
-#endif
-
   test->database = g_tls_file_database_new (tls_test_file_path ("garbage.pem"), &error);
-  g_assert_no_error (error);
-  g_assert_nonnull (test->database);
+  g_assert_error (error, G_TLS_ERROR, G_TLS_ERROR_MISC);
+  g_assert_null (test->database);
+  g_clear_error (&error);
 
   connection = start_async_server_and_connect_to_it (test, G_TLS_AUTHENTICATION_NONE);
   test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
@@ -2211,7 +2190,9 @@ test_garbage_database (TestConnection *test,
    * no valid certificates.
    */
   g_assert_error (test->read_error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE);
+#ifdef BACKEND_IS_GNUTLS
   g_assert_error (test->server_error, G_TLS_ERROR, G_TLS_ERROR_NOT_TLS);
+#endif
 }
 
 static void
@@ -2266,11 +2247,6 @@ test_alpn (TestConnection *test,
 {
   GIOStream *connection;
   GError *error = NULL;
-
-#ifdef BACKEND_IS_OPENSSL
-  g_test_skip ("this is not yet passing with openssl");
-  return;
-#endif
 
   test->server_protocols = server_protocols;
 
@@ -2377,11 +2353,6 @@ test_sync_op_during_handshake (TestConnection *test,
   GIOStream *connection;
   GError *error = NULL;
 
-#ifdef BACKEND_IS_OPENSSL
-  g_test_skip ("this is not yet passing with openssl");
-  return;
-#endif
-
   connection = start_async_server_and_connect_to_it (test, G_TLS_AUTHENTICATION_NONE);
   test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
   g_assert_no_error (error);
@@ -2412,11 +2383,6 @@ test_socket_timeout (TestConnection *test,
   GSocketClient *client;
   GError *error = NULL;
 
-#ifdef BACKEND_IS_OPENSSL
-  g_test_skip ("this new test does not work with openssl, more research needed");
-  return;
-#endif
-
   test->incoming_connection_delay = (gulong)(1.1 * G_USEC_PER_SEC);
 
   start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, WRITE_THEN_CLOSE);
@@ -2441,7 +2407,383 @@ test_socket_timeout (TestConnection *test,
   wait_until_server_finished (test);
 
   g_assert_error (test->read_error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+#ifndef BACKEND_IS_OPENSSL
   g_assert_error (test->server_error, G_TLS_ERROR, G_TLS_ERROR_NOT_TLS);
+#endif
+}
+
+static void
+test_connection_binding_match_tls_unique (TestConnection *test,
+                                          gconstpointer   data)
+{
+  GSocketClient *client;
+  GIOStream *connection;
+  GByteArray *client_cb, *server_cb;
+  gchar *client_b64, *server_b64;
+  GError *error = NULL;
+
+  test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->database);
+
+  start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, WRITE_THEN_WAIT);
+
+  client = g_socket_client_new ();
+  connection = G_IO_STREAM (g_socket_client_connect (client, G_SOCKET_CONNECTABLE (test->address),
+                                                     NULL, &error));
+  g_assert_no_error (error);
+  g_object_unref (client);
+
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_unref (connection);
+
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  /* All validation in this test */
+  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
+                                                G_TLS_CERTIFICATE_VALIDATE_ALL);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+
+  /* Smoke test: ensure both sides support tls-unique */
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
+                                                  G_TLS_CHANNEL_BINDING_TLS_UNIQUE, NULL, NULL));
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
+                                                  G_TLS_CHANNEL_BINDING_TLS_UNIQUE, NULL, NULL));
+
+  /* Real test: retrieve bindings and compare */
+  client_cb = g_byte_array_new ();
+  server_cb = g_byte_array_new ();
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
+                                                  G_TLS_CHANNEL_BINDING_TLS_UNIQUE, client_cb, NULL));
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
+                                                  G_TLS_CHANNEL_BINDING_TLS_UNIQUE, server_cb, NULL));
+
+#ifdef BACKEND_IS_OPENSSL
+  g_assert_cmpint (client_cb->len, >, 0);
+  g_assert_cmpint (server_cb->len, >, 0);
+#else
+  /* GnuTLS returns empty binding for TLS1.3, let's pretend it didn't happen
+   * see https://gitlab.com/gnutls/gnutls/-/issues/1041 */
+  if (client_cb->len == 0 && server_cb->len == 0)
+    g_test_skip ("GnuTLS missing support for tls-unique over TLS1.3");
+#endif
+
+  client_b64 = g_base64_encode (client_cb->data, client_cb->len);
+  server_b64 = g_base64_encode (server_cb->data, server_cb->len);
+  g_assert_cmpstr (client_b64, ==, server_b64);
+
+  g_free (client_b64);
+  g_free (server_b64);
+  g_byte_array_unref (client_cb);
+  g_byte_array_unref (server_cb);
+
+  /* drop the mic */
+  close_server_connection (test);
+  wait_until_server_finished (test);
+
+  g_assert_no_error (test->read_error);
+  g_assert_no_error (test->server_error);
+}
+
+/* create_files.sh should update this digest but if anything goes wrong
+ * please make sure the string below matches the output of
+ * openssl x509 -outform der -in files/server.pem | openssl sha256 -binary | base64
+ **/
+#define SERVER_CERT_DIGEST_B64 "kGOeAZnSeNtf5yzBZzUhbKFpW9qsPV+lIB/4t96OV+E="
+static void
+test_connection_binding_match_tls_server_end_point (TestConnection *test,
+                                                    gconstpointer   data)
+{
+  GSocketClient *client;
+  GIOStream *connection;
+  GByteArray *client_cb, *server_cb;
+  gchar *client_b64, *server_b64;
+  GError *error = NULL;
+
+  test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->database);
+
+  start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, WRITE_THEN_WAIT);
+
+  client = g_socket_client_new ();
+  connection = G_IO_STREAM (g_socket_client_connect (client, G_SOCKET_CONNECTABLE (test->address),
+                                                     NULL, &error));
+  g_assert_no_error (error);
+  g_object_unref (client);
+
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_unref (connection);
+
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  /* All validation in this test */
+  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
+                                                G_TLS_CERTIFICATE_VALIDATE_ALL);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+
+  /* Smoke test: ensure both sides support tls-server-end-point */
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
+                                        G_TLS_CHANNEL_BINDING_TLS_SERVER_END_POINT, NULL, NULL));
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
+                                        G_TLS_CHANNEL_BINDING_TLS_SERVER_END_POINT, NULL, NULL));
+
+  /* Real test: retrieve bindings and compare */
+  client_cb = g_byte_array_new ();
+  server_cb = g_byte_array_new ();
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
+                                        G_TLS_CHANNEL_BINDING_TLS_SERVER_END_POINT, client_cb, NULL));
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
+                                        G_TLS_CHANNEL_BINDING_TLS_SERVER_END_POINT, server_cb, NULL));
+
+  client_b64 = g_base64_encode (client_cb->data, client_cb->len);
+  server_b64 = g_base64_encode (server_cb->data, server_cb->len);
+  g_assert_cmpstr (client_b64, ==, server_b64);
+  g_assert_cmpstr (client_b64, ==, SERVER_CERT_DIGEST_B64);
+  g_assert_cmpstr (server_b64, ==, SERVER_CERT_DIGEST_B64);
+
+  g_free (client_b64);
+  g_free (server_b64);
+  g_byte_array_unref (client_cb);
+  g_byte_array_unref (server_cb);
+
+  /* drop the mic */
+  close_server_connection (test);
+  wait_until_server_finished (test);
+
+  g_assert_no_error (test->read_error);
+  g_assert_no_error (test->server_error);
+}
+
+static void
+test_connection_binding_match_tls_exporter (TestConnection *test,
+                                            gconstpointer   data)
+{
+  GSocketClient *client;
+  GIOStream *connection;
+  GByteArray *client_cb, *server_cb;
+  gchar *client_b64, *server_b64;
+  GError *error = NULL;
+
+  test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->database);
+
+  start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, WRITE_THEN_WAIT);
+
+  client = g_socket_client_new ();
+  connection = G_IO_STREAM (g_socket_client_connect (client, G_SOCKET_CONNECTABLE (test->address),
+                                                     NULL, &error));
+  g_assert_no_error (error);
+  g_object_unref (client);
+
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_unref (connection);
+
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  /* All validation in this test */
+  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
+                                                G_TLS_CERTIFICATE_VALIDATE_ALL);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+
+  /* Smoke test: ensure both sides support tls-exporter */
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
+                                                    (GTlsChannelBindingType)100500, NULL, NULL));
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
+                                                    (GTlsChannelBindingType)100500, NULL, NULL));
+
+  /* Real test: retrieve bindings and compare */
+  client_cb = g_byte_array_new ();
+  server_cb = g_byte_array_new ();
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
+                                                    (GTlsChannelBindingType)100500, client_cb, NULL));
+  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
+                                                    (GTlsChannelBindingType)100500, server_cb, NULL));
+
+  client_b64 = g_base64_encode (client_cb->data, client_cb->len);
+  server_b64 = g_base64_encode (server_cb->data, server_cb->len);
+  g_assert_cmpstr (client_b64, ==, server_b64);
+
+  g_free (client_b64);
+  g_free (server_b64);
+  g_byte_array_unref (client_cb);
+  g_byte_array_unref (server_cb);
+
+  /* drop the mic */
+  close_server_connection (test);
+  wait_until_server_finished (test);
+
+  g_assert_no_error (test->read_error);
+  g_assert_no_error (test->server_error);
+}
+
+static void
+test_connection_missing_server_identity (TestConnection *test,
+                                         gconstpointer   data)
+{
+  GIOStream *connection;
+  GError *error = NULL;
+
+  test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->database);
+
+  /* We pass NULL instead of test->identity when creating the client
+   * connection. This means verification must fail with
+   * G_TLS_CERTIFICATE_BAD_IDENTITY.
+   */
+  connection = start_async_server_and_connect_to_it (test, G_TLS_AUTHENTICATION_NONE);
+  test->client_connection = g_tls_client_connection_new (connection, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_unref (connection);
+
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  /* All validation in this test */
+  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
+                                                G_TLS_CERTIFICATE_VALIDATE_ALL);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+  wait_until_server_finished (test);
+
+  g_assert_error (test->read_error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE);
+
+#ifdef BACKEND_IS_GNUTLS
+  g_assert_error (test->server_error, G_TLS_ERROR, G_TLS_ERROR_NOT_TLS);
+#elif defined(BACKEND_IS_OPENSSL)
+  /* FIXME: This is not OK. There should be a NOT_TLS errors. But some times
+   * we either get no error or BROKEN_PIPE
+   */
+#endif
+
+  g_clear_error (&test->read_error);
+  g_clear_error (&test->server_error);
+
+  g_clear_object (&test->client_connection);
+  g_clear_object (&test->server_connection);
+
+  /* Now do the same thing again, this time ignoring bad identity. */
+
+  connection = start_async_server_and_connect_to_it (test, G_TLS_AUTHENTICATION_NONE);
+  test->client_connection = g_tls_client_connection_new (connection, NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_unref (connection);
+
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
+                                                G_TLS_CERTIFICATE_VALIDATE_ALL & ~G_TLS_CERTIFICATE_BAD_IDENTITY);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+  wait_until_server_finished (test);
+
+  g_assert_no_error (test->read_error);
+  g_assert_no_error (test->server_error);
+}
+
+typedef struct {
+  TestConnection *test;
+  gboolean peer_certificate_notified;
+  gboolean peer_certificate_errors_notified;
+} NotifyTestData;
+
+static gboolean
+on_accept_certificate_peer_certificate_notify (GTlsConnection       *conn,
+                                               GTlsCertificate      *cert,
+                                               GTlsCertificateFlags  errors,
+                                               NotifyTestData       *data)
+{
+  TestConnection *test = data->test;
+
+  g_assert_true (G_IS_TLS_CERTIFICATE (cert));
+
+  /* We guarantee these props are not set until after the handshake. */
+  g_assert_null (g_tls_connection_get_peer_certificate (conn));
+  g_assert_cmpint (g_tls_connection_get_peer_certificate_errors (conn), ==, 0);
+
+  g_assert_false (data->peer_certificate_notified);
+  g_assert_false (data->peer_certificate_errors_notified);
+
+  return errors == test->accept_flags;
+}
+
+static void
+on_peer_certificate_notify (GTlsConnection *conn,
+                            GParamSpec     *pspec,
+                            gboolean       *notified)
+{
+  *notified = TRUE;
+}
+
+static void
+on_peer_certificate_errors_notify (GTlsConnection *conn,
+                                   GParamSpec     *pspec,
+                                   gboolean       *notified)
+{
+  *notified = TRUE;
+}
+
+static void
+test_peer_certificate_notify (TestConnection *test,
+                              gconstpointer   data)
+{
+  NotifyTestData notify_data = { test, FALSE, FALSE };
+  GIOStream *connection;
+  GError *error = NULL;
+
+  connection = start_async_server_and_connect_to_it (test, G_TLS_AUTHENTICATION_NONE);
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_object_unref (connection);
+
+  /* For this test, we need validation to fail to ensure that the
+   * accept-certificate signal gets emitted.
+   */
+  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
+                                                G_TLS_CERTIFICATE_VALIDATE_ALL);
+
+  g_signal_connect (test->client_connection, "accept-certificate",
+                    G_CALLBACK (on_accept_certificate_peer_certificate_notify), &notify_data);
+  g_signal_connect (test->client_connection, "notify::peer-certificate",
+                    G_CALLBACK (on_peer_certificate_notify), &notify_data.peer_certificate_notified);
+  g_signal_connect (test->client_connection, "notify::peer-certificate-errors",
+                    G_CALLBACK (on_peer_certificate_errors_notify), &notify_data.peer_certificate_errors_notified);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+  wait_until_server_finished (test);
+
+  g_assert_true (notify_data.peer_certificate_notified);
+  g_assert_true (notify_data.peer_certificate_errors_notified);
+
+  g_assert_true (G_IS_TLS_CERTIFICATE (g_tls_connection_get_peer_certificate (G_TLS_CONNECTION (test->client_connection))));
+  g_assert_cmpint (g_tls_connection_get_peer_certificate_errors (G_TLS_CONNECTION (test->client_connection)), !=, 0);
+
+  g_assert_error (test->read_error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE);
+#ifdef BACKEND_IS_GNUTLS
+  g_assert_error (test->server_error, G_TLS_ERROR, G_TLS_ERROR_NOT_TLS);
+#elif defined(BACKEND_IS_OPENSSL)
+  /* FIXME: This is not OK. There should be a NOT_TLS errors. But some times
+   * we either get no error or BROKEN_PIPE
+   */
+#endif
 }
 
 int
@@ -2530,6 +2872,16 @@ main (int   argc,
               setup_connection, test_sync_op_during_handshake, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/socket-timeout", TestConnection, NULL,
               setup_connection, test_socket_timeout, teardown_connection);
+  g_test_add ("/tls/" BACKEND "/connection/missing-server-identity", TestConnection, NULL,
+              setup_connection, test_connection_missing_server_identity, teardown_connection);
+  g_test_add ("/tls/" BACKEND "/connection/peer-certificate-notify", TestConnection, NULL,
+              setup_connection, test_peer_certificate_notify, teardown_connection);
+  g_test_add ("/tls/" BACKEND "/connection/binding/match-tls-unique", TestConnection, NULL,
+              setup_connection, test_connection_binding_match_tls_unique, teardown_connection);
+  g_test_add ("/tls/" BACKEND "/connection/binding/match-tls-server-end-point", TestConnection, NULL,
+              setup_connection, test_connection_binding_match_tls_server_end_point, teardown_connection);
+  g_test_add ("/tls/" BACKEND "/connection/binding/match-tls-exporter", TestConnection, NULL,
+              setup_connection, test_connection_binding_match_tls_exporter, teardown_connection);
 
   ret = g_test_run ();
 

@@ -1,10 +1,9 @@
-FROM fedora:32
+FROM fedora:rawhide
 
 RUN dnf update -y \
     && dnf install -y 'dnf-command(builddep)' \
     && dnf builddep -y glib-networking \
-    && dnf install -y gsettings-desktop-schemas \
-                      gcc \
+    && dnf install -y clang-analyzer \
                       libasan \
                       openssl-devel \
     && dnf clean all

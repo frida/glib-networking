@@ -1,17 +1,21 @@
 @echo on
 :: vcvarsall.bat sets various env vars like PATH, INCLUDE, LIB, LIBPATH for the
 :: specified build architecture
-call "C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+call "C:\Program Files (x86)\Microsoft Visual Studio\2017\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
 @echo on
 
 set BUILD_DIR=c:\gnet
-@RD /S /Q %BUILD_DIR%
 
-git clone --depth 1 https://github.com/wingtk/gvsbuild.git || goto :error
+:: NOTE: uncomment this in a branch in order to update the depenencies. We do not
+:: build it each time to avoid spending so much of time building openssl and glib
+:: so we just keep it cached in c:\gnet
+::@RD /S /Q %BUILD_DIR%
 
-pushd gvsbuild
-python.exe build.py --verbose --debug build -p x64 --vs-ver 15 --build-dir %BUILD_DIR% openssl glib || goto :error
-popd
+::git clone --depth 1 https://github.com/wingtk/gvsbuild.git || goto :error
+
+::pushd gvsbuild
+::python.exe build.py --verbose --debug build -p x64 --vs-ver 15 --build-dir %BUILD_DIR% openssl glib || goto :error
+::popd
 
 set DEPS_DIR=%BUILD_DIR%\gtk\x64\release
 set PATH=%DEPS_DIR%\bin;%PATH%

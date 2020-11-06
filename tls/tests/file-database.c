@@ -470,7 +470,7 @@ test_lookup_certificates_issued_by (void)
   /* This data is generated from the frob-certificate test tool in gcr library.
    * To regenerate (from e.g. a directory containing gcr and glib-networking):
    *
-   * $ gcr/frob-certificate glib-networking/tls/tests/files/ca.pem
+   * $ gcr/_build/ui/test-frob-certificate glib-networking/tls/tests/files/ca.pem
    *
    * Then copy the hex that is printed after "subject" (not "issuer"!) and add
    * the missing 'x's.
@@ -544,7 +544,7 @@ main (int   argc,
 
   g_setenv ("GSETTINGS_BACKEND", "memory", TRUE);
   g_setenv ("GIO_USE_TLS", BACKEND, TRUE);
-  g_assert (g_ascii_strcasecmp (G_OBJECT_TYPE_NAME (g_tls_backend_get_default ()), "GTlsBackend" BACKEND) == 0);
+  g_assert_cmpint (g_ascii_strcasecmp (G_OBJECT_TYPE_NAME (g_tls_backend_get_default ()), "GTlsBackend" BACKEND), ==, 0);
 
   g_test_add_func ("/tls/" BACKEND "/backend/default-database-is-singleton",
                    test_default_database_is_singleton);

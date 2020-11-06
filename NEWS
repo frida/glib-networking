@@ -1,3 +1,32 @@
+2.66.0 - September 11, 2020
+===========================
+
+- Updated translations
+
+2.65.90 - August 6, 2020
+========================
+
+ - Many fixes to OpenSSL backend (!128, Ruslan Marchenko)
+
+2.65.1 - July 2, 2020
+=====================
+
+ - Fix peer-certificate[-errors] props set too soon (#127)
+ - Implement ALPN for OpenSSL backend (!126, Ruslan Marchenko)
+ - Fix Windows build (!127, Cun-wei Fan)
+
+2.64.3 - May 28, 2020
+=====================
+
+- Revert warning when server-identity property is unset (#130)
+- Fix CVE-2020-13645, fail connections when server identity is unset (#135)
+
+2.64.2 - April 14, 2020
+=======================
+
+- Reenable TLS 1.0/1.1 protocols due to COVID-19.
+- Fix build warning on Windows.
+
 2.64.1 - March 27, 2020
 =======================
 

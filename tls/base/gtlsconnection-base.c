@@ -1233,24 +1233,23 @@ static GTlsCertificateFlags
 verify_peer_certificate (GTlsConnectionBase *tls,
                          GTlsCertificate    *peer_certificate)
 {
-  GSocketConnectable *peer_identity;
+  GSocketConnectable *peer_identity = NULL;
   GTlsDatabase *database;
-  GTlsCertificateFlags errors;
+  GTlsCertificateFlags errors = 0;
   gboolean is_client;
 
   is_client = G_IS_TLS_CLIENT_CONNECTION (tls);
 
-  if (!is_client)
-    peer_identity = NULL;
-  else if (!g_tls_connection_base_is_dtls (tls))
-    peer_identity = g_tls_client_connection_get_server_identity (G_TLS_CLIENT_CONNECTION (tls));
-  else
-    peer_identity = g_dtls_client_connection_get_server_identity (G_DTLS_CLIENT_CONNECTION (tls));
+  if (is_client)
+    {
+      if (!g_tls_connection_base_is_dtls (tls))
+        peer_identity = g_tls_client_connection_get_server_identity (G_TLS_CLIENT_CONNECTION (tls));
+      else
+        peer_identity = g_dtls_client_connection_get_server_identity (G_DTLS_CLIENT_CONNECTION (tls));
 
-  if (is_client && !peer_identity)
-    g_warning ("GTlsClientConnection certificate verification will fail because its server-identity property is NULL. Fix your application!");
-
-  errors = 0;
+      if (!peer_identity)
+        errors |= G_TLS_CERTIFICATE_BAD_IDENTITY;
+    }
 
   database = g_tls_connection_get_database (G_TLS_CONNECTION (tls));
   if (!database)
@@ -1281,51 +1280,28 @@ verify_peer_certificate (GTlsConnectionBase *tls,
   return errors;
 }
 
-static void
-update_peer_certificate_and_compute_errors (GTlsConnectionBase *tls)
-{
-  GTlsConnectionBasePrivate *priv = g_tls_connection_base_get_instance_private (tls);
-  GTlsCertificate *peer_certificate = NULL;
-  GTlsCertificateFlags peer_certificate_errors = 0;
-
-  /* This function must be called from the handshake context thread
-   * (probably the main thread, NOT the handshake thread) because
-   * it emits notifies that are application-visible.
-   *
-   * verify_certificate_mutex should be locked.
-   */
-  g_assert (priv->handshake_context);
-  g_assert (g_main_context_is_owner (priv->handshake_context));
-
-  peer_certificate = G_TLS_CONNECTION_BASE_GET_CLASS (tls)->retrieve_peer_certificate (tls);
-  if (peer_certificate)
-    peer_certificate_errors = verify_peer_certificate (tls, peer_certificate);
-
-  g_clear_object (&priv->peer_certificate);
-  priv->peer_certificate = g_steal_pointer (&peer_certificate);
-  g_clear_object (&peer_certificate);
-
-  priv->peer_certificate_errors = peer_certificate_errors;
-
-  g_object_notify (G_OBJECT (tls), "peer-certificate");
-  g_object_notify (G_OBJECT (tls), "peer-certificate-errors");
-}
-
 static gboolean
 accept_or_reject_peer_certificate (gpointer user_data)
 {
   GTlsConnectionBase *tls = user_data;
   GTlsConnectionBasePrivate *priv = g_tls_connection_base_get_instance_private (tls);
+  GTlsCertificate *peer_certificate = NULL;
+  GTlsCertificateFlags peer_certificate_errors = 0;
   gboolean accepted = FALSE;
 
+  /* This function must be called from the handshake context thread
+   * (probably the main thread, NOT the handshake thread) because
+   * it emits notifies that are application-visible.
+   */
+  g_assert (priv->handshake_context);
   g_assert (g_main_context_is_owner (priv->handshake_context));
 
-  g_mutex_lock (&priv->verify_certificate_mutex);
+  peer_certificate = G_TLS_CONNECTION_BASE_GET_CLASS (tls)->retrieve_peer_certificate (tls);
 
-  update_peer_certificate_and_compute_errors (tls);
-
-  if (priv->peer_certificate)
+  if (peer_certificate)
     {
+      peer_certificate_errors = verify_peer_certificate (tls, peer_certificate);
+
       if (G_IS_TLS_CLIENT_CONNECTION (tls))
         {
           GTlsCertificateFlags validation_flags;
@@ -1337,7 +1313,7 @@ accept_or_reject_peer_certificate (gpointer user_data)
             validation_flags =
               g_dtls_client_connection_get_validation_flags (G_DTLS_CLIENT_CONNECTION (tls));
 
-          if ((priv->peer_certificate_errors & validation_flags) == 0)
+          if ((peer_certificate_errors & validation_flags) == 0)
             accepted = TRUE;
         }
 
@@ -1353,8 +1329,8 @@ accept_or_reject_peer_certificate (gpointer user_data)
             g_main_context_pop_thread_default (priv->handshake_context);
 
           accepted = g_tls_connection_emit_accept_certificate (G_TLS_CONNECTION (tls),
-                                                               priv->peer_certificate,
-                                                               priv->peer_certificate_errors);
+                                                               peer_certificate,
+                                                               peer_certificate_errors);
 
           if (sync_handshake_in_progress)
             g_main_context_push_thread_default (priv->handshake_context);
@@ -1372,7 +1348,19 @@ accept_or_reject_peer_certificate (gpointer user_data)
         accepted = TRUE;
     }
 
+  g_mutex_lock (&priv->verify_certificate_mutex);
+
   priv->peer_certificate_accepted = accepted;
+
+  /* Warning: the API documentation indicates that these properties are not
+   * set until *after* accept-certificate.
+   */
+  g_clear_object (&priv->peer_certificate);
+  priv->peer_certificate = g_steal_pointer (&peer_certificate);
+  priv->peer_certificate_errors = peer_certificate_errors;
+
+  g_object_notify (G_OBJECT (tls), "peer-certificate");
+  g_object_notify (G_OBJECT (tls), "peer-certificate-errors");
 
   /* This has to be the very last statement before signaling the
    * condition variable because otherwise the code could spuriously
@@ -1416,6 +1404,41 @@ g_tls_connection_base_handshake_thread_verify_certificate (GTlsConnectionBase *t
   g_mutex_unlock (&priv->verify_certificate_mutex);
 
   return accepted;
+}
+
+static gboolean
+g_tls_connection_base_get_binding_data (GTlsConnection          *conn,
+                                        GTlsChannelBindingType   type,
+                                        GByteArray              *data,
+                                        GError                 **error)
+{
+  GTlsConnectionBase *tls = G_TLS_CONNECTION_BASE (conn);
+  GTlsConnectionBasePrivate *priv = g_tls_connection_base_get_instance_private (tls);
+  GTlsConnectionBaseClass *tls_class = G_TLS_CONNECTION_BASE_GET_CLASS (tls);
+
+  g_assert (tls_class->get_channel_binding_data);
+
+  if (!priv->ever_handshaked || priv->need_handshake)
+    {
+      g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR,
+                   G_TLS_CHANNEL_BINDING_ERROR_INVALID_STATE,
+                   _("Handshake is not finished, no channel binding information yet"));
+      return FALSE;
+    }
+
+  return tls_class->get_channel_binding_data (tls, type, data, error);
+}
+
+static gboolean
+g_tls_connection_base_dtls_get_binding_data (GDtlsConnection         *conn,
+                                             GTlsChannelBindingType   type,
+                                             GByteArray              *data,
+                                             GError                 **error)
+{
+  GTlsConnectionBase *tls = G_TLS_CONNECTION_BASE (conn);
+
+  return g_tls_connection_base_get_binding_data ((GTlsConnection *)tls,
+                                                 type, data, error);
 }
 
 static void
@@ -1585,7 +1608,14 @@ finish_handshake (GTlsConnectionBase  *tls,
            * anything with the result here.
            */
           g_mutex_lock (&priv->verify_certificate_mutex);
-          update_peer_certificate_and_compute_errors (tls);
+
+          g_clear_object (&priv->peer_certificate);
+          priv->peer_certificate = G_TLS_CONNECTION_BASE_GET_CLASS (tls)->retrieve_peer_certificate (tls);
+          priv->peer_certificate_errors = verify_peer_certificate (tls, priv->peer_certificate);
+
+          g_object_notify (G_OBJECT (tls), "peer-certificate");
+          g_object_notify (G_OBJECT (tls), "peer-certificate-errors");
+
           priv->peer_certificate_examined = TRUE;
           priv->peer_certificate_accepted = TRUE;
           g_mutex_unlock (&priv->verify_certificate_mutex);
@@ -1992,7 +2022,7 @@ g_tls_connection_base_read_message (GTlsConnectionBase  *tls,
                                     GError             **error)
 {
   GTlsConnectionBasePrivate *priv = g_tls_connection_base_get_instance_private (tls);
-  GTlsConnectionBaseStatus status;
+  GTlsConnectionBaseStatus status = G_TLS_CONNECTION_BASE_OK;
   gssize nread;
 
   g_tls_log_debug (tls, "starting to read messages from TLS connection");
@@ -2020,7 +2050,6 @@ g_tls_connection_base_read_message (GTlsConnectionBase  *tls,
               g_clear_pointer (&priv->app_data_buf, g_byte_array_unref);
             else
               g_byte_array_remove_range (priv->app_data_buf, 0, count);
-            status = G_TLS_CONNECTION_BASE_OK;
           }
       }
     else
@@ -2155,7 +2184,7 @@ g_tls_connection_base_write (GTlsConnectionBase  *tls,
       return nwrote;
     }
 
-  g_tls_log_debug (tls, "writting data to TLS connection has failed: %s", status_to_string (status));
+  g_tls_log_debug (tls, "writing data to TLS connection has failed: %s", status_to_string (status));
   return -1;
 }
 
@@ -2192,7 +2221,7 @@ g_tls_connection_base_write_message (GTlsConnectionBase  *tls,
       return nwrote;
     }
 
-  g_tls_log_debug (tls, "writting messages to TLS connection has failed: %s", status_to_string (status));
+  g_tls_log_debug (tls, "writing messages to TLS connection has failed: %s", status_to_string (status));
   return -1;
 }
 
@@ -2685,6 +2714,7 @@ g_tls_connection_base_class_init (GTlsConnectionBaseClass *klass)
   connection_class->handshake        = g_tls_connection_base_handshake;
   connection_class->handshake_async  = g_tls_connection_base_handshake_async;
   connection_class->handshake_finish = g_tls_connection_base_handshake_finish;
+  connection_class->get_binding_data = g_tls_connection_base_get_binding_data;
 
   iostream_class->get_input_stream  = g_tls_connection_base_get_input_stream;
   iostream_class->get_output_stream = g_tls_connection_base_get_output_stream;
@@ -2721,6 +2751,7 @@ g_tls_connection_base_dtls_connection_iface_init (GDtlsConnectionInterface *ifac
   iface->shutdown_finish = g_tls_connection_base_dtls_shutdown_finish;
   iface->set_advertised_protocols = g_tls_connection_base_dtls_set_advertised_protocols;
   iface->get_negotiated_protocol = g_tls_connection_base_dtls_get_negotiated_protocol;
+  iface->get_binding_data = g_tls_connection_base_dtls_get_binding_data;
 }
 
 static void
