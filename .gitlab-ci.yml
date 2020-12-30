@@ -1,7 +1,10 @@
-image: registry.gitlab.gnome.org/gnome/glib-networking/master:v16
+image: registry.gitlab.gnome.org/gnome/glib-networking/master:v17
 
 fedora-x86_64:
   stage: build
+  variables:
+    # Remove for PKCS11 logs, otherwise generates a lot of noise hitting gitlab's limit
+    PKCS11SPY_PATH: disabled
   script:
     - meson --prefix=$HOME/glib-networking-installed
             -Dgnutls=enabled
@@ -21,6 +24,9 @@ fedora-x86_64:
 fedora-x86_64-asan:
   tags: [ asan ]
   stage: build
+  variables:
+    PKCS11SPY_PATH: disabled
+    ASAN_OPTIONS: fast_unwind_on_malloc=0
   script:
     - meson -Db_sanitize=address
             -Dgnutls=enabled
@@ -30,7 +36,7 @@ fedora-x86_64-asan:
             -Dwerror=true
             _build/
     - meson compile -C _build/
-    - ASAN_OPTIONS=fast_unwind_on_malloc=0 meson test --verbose --timeout-multiplier=10 -C _build/
+    - meson test --verbose --timeout-multiplier=10 -C _build/
   artifacts:
     paths:
       - _build/test-results
