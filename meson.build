@@ -32,15 +32,6 @@ common_flags = [
   '-DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_56'
 ]
 
-ndebug = get_option('b_ndebug')
-if ndebug == 'true' or (ndebug == 'if-release' and not get_option('debug'))
-  common_flags += [
-    '-DG_DISABLE_CAST_CHECKS',
-    '-DG_DISABLE_ASSERT',
-    '-DG_DISABLE_CHECKS'
-  ]
-endif
-
 add_project_arguments(common_flags, language: 'c')
 
 cflags = cc.get_supported_arguments(['-Werror=declaration-after-statement',
@@ -51,7 +42,7 @@ symbol_map = join_paths(meson.current_source_dir(), meson.project_name() + '.map
 
 module_ldflags = []
 
-if host_system.contains('linux') or host_system == 'android'
+if host_system.contains('linux')
   test_ldflag = '-Wl,--version-script,' + symbol_map
   module_ldflags += cc.get_supported_link_arguments(test_ldflag)
 endif
@@ -65,15 +56,6 @@ gobject_dep = dependency('gobject-2.0',
   fallback: ['glib', 'libgobject_dep'])
 gmodule_dep = dependency('gmodule-2.0',
   fallback: ['glib', 'libgmodule_dep'])
-
-gio_supports_plugins = cc.compiles('''
-#include <glib.h>
-#ifdef GIO_STATIC_COMPILATION
-# error GIO does not support plugins
-#endif
-  ''',
-  name: 'GIO supports plugins',
-  dependencies: [gio_dep])
 
 if glib_dep.type_name() == 'internal'
   glib_proj = subproject('glib')
@@ -208,17 +190,19 @@ if gnutls_dep.found()
 endif
 
 if backends.contains('openssl')
+  if ['darwin', 'ios'].contains(host_system)
+    security_dep = dependency('appleframeworks', modules : ['Security'])
+  endif
+
   subdir('tls/openssl')
 endif
 
 subdir('tls/tests')
 
-if gio_supports_plugins
-  # Will automatically pick it up from the cross file if defined
-  gio_querymodules = find_program('gio-querymodules', required : false)
-  if gio_querymodules.found()
-    meson.add_install_script('meson_post_install.py', gio_querymodules.path(), gio_module_dir)
-  endif
+# Will automatically pick it up from the cross file if defined
+gio_querymodules = find_program('gio-querymodules', required : false)
+if gio_querymodules.found()
+  meson.add_install_script('meson_post_install.py', gio_querymodules.path(), gio_module_dir)
 endif
 
 output = '\n\n'

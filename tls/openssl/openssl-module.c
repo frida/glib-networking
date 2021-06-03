@@ -30,17 +30,6 @@
 
 #include "gtlsbackend-openssl.h"
 
-#ifdef G_IO_MODULE_BUILD_STATIC
-
-#include "gioopenssl.h"
-
-void
-g_io_module_openssl_register (void)
-{
-  g_tls_backend_openssl_register (NULL);
-}
-
-#else
 
 G_MODULE_EXPORT void
 g_io_openssl_load (GIOModule *module)
@@ -75,5 +64,3 @@ g_io_openssl_query (void)
 {
   return g_strsplit (G_TLS_BACKEND_EXTENSION_POINT_NAME, "!", -1);
 }
-
-#endif
