@@ -32,6 +32,7 @@
 #include "openssl-include.h"
 
 #ifdef __APPLE__
+#include <dlfcn.h>
 #include <Security/Security.h>
 #endif
 
@@ -156,11 +157,39 @@ static gboolean
 populate_store (X509_STORE  *store,
                 GError     **error)
 {
+  void *security, *cf;
+  OSStatus (*copy_anchor_certificates) (CFArrayRef _Nullable *anchors);
+  CFDataRef (*certificate_copy_data) (SecCertificateRef certificate);
+  CFIndex (*array_get_count) (CFArrayRef array);
+  const void *(*array_get_value_at_index) (CFArrayRef array, CFIndex idx);
+  const UInt8 *(*data_get_byte_ptr) (CFDataRef data);
+  CFIndex (*data_get_length) (CFDataRef data);
+  void (*release) (CFTypeRef cf);
   CFArrayRef anchors;
   OSStatus ret;
-  CFIndex i;
+  CFIndex n, i;
 
-  ret = SecTrustCopyAnchorCertificates (&anchors);
+  security = dlopen ("/System/Library/Frameworks/Security.framework/Security",
+                     RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
+  if (!security)
+    return TRUE;
+
+  cf = dlopen ("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+               RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
+
+  copy_anchor_certificates = dlsym (security, "SecTrustCopyAnchorCertificates");
+  certificate_copy_data = dlsym (security, "SecCertificateCopyData");
+
+  array_get_count = dlsym (cf, "CFArrayGetCount");
+  array_get_value_at_index = dlsym (cf, "CFArrayGetValueAtIndex");
+  data_get_byte_ptr = dlsym (cf, "CFDataGetBytePtr");
+  data_get_length = dlsym (cf, "CFDataGetLength");
+  release = dlsym (cf, "CFRelease");
+
+  dlclose (cf);
+  dlclose (security);
+
+  ret = copy_anchor_certificates (&anchors);
   if (ret != errSecSuccess)
     {
       g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
@@ -168,29 +197,30 @@ populate_store (X509_STORE  *store,
       return FALSE;
     }
 
-  for (i = 0; i < CFArrayGetCount (anchors); i++)
+  n = array_get_count (anchors);
+  for (i = 0; i < n; i++)
     {
       SecCertificateRef cert;
       CFDataRef data;
 
-      cert = (SecCertificateRef)CFArrayGetValueAtIndex (anchors, i);
-      data = SecCertificateCopyData (cert);
+      cert = (SecCertificateRef)array_get_value_at_index (anchors, i);
+      data = certificate_copy_data (cert);
       if (data)
         {
           X509 *x;
           const unsigned char *pdata;
 
-          pdata = (const unsigned char *)CFDataGetBytePtr (data);
+          pdata = (const unsigned char *)data_get_byte_ptr (data);
 
-          x = d2i_X509 (NULL, &pdata, CFDataGetLength (data));
+          x = d2i_X509 (NULL, &pdata, data_get_length (data));
           if (x)
             X509_STORE_add_cert (store, x);
 
-          CFRelease (data);
+          release (data);
         }
     }
 
-  CFRelease (anchors);
+  release (anchors);
   return TRUE;
 }
 

@@ -23,11 +23,7 @@ deps = [
   tlsbase_dep,
 ]
 
-if ['darwin', 'ios'].contains(host_system)
-  deps += [
-    security_dep,
-  ]
-elif ['windows'].contains(host_system)
+if host_system == 'windows'
   deps += [
     crypt32_dep,
   ]
