@@ -24,12 +24,6 @@ deps = [
   tlsbase_dep,
 ]
 
-if ['darwin', 'ios'].contains(host_system)
-  deps += [
-    security_dep,
-  ]
-endif
-
 if gio_supports_plugins
   module = shared_module(
     'gioopenssl',
