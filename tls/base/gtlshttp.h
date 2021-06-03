@@ -1,6 +1,8 @@
 /* -*- Mode: C; tab-width: 2; indent-tabs-mode: nil; c-basic-offset: 2 -*- */
 /*
- * Copyright (C) 2011 Collabora Ltd.
+ * GIO - GLib Input, Output and Streaming Library
+ *
+ * Copyright 2021 Igalia S.L.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -16,25 +18,14 @@
  * Public License along with this library; if not, see
  * <http://www.gnu.org/licenses/>.
  *
- * Author: Stef Walter <stefw@collabora.co.uk>
+ * In addition, when the library is used with OpenSSL, a special
+ * exception applies. Refer to the LICENSE_EXCEPTION file for details.
  */
-
-#include <gio/gio.h>
 
 #pragma once
 
-G_BEGIN_DECLS
+#include <gio/gio.h>
 
-#define MOCK_TYPE_INTERACTION         (mock_interaction_get_type ())
-
-G_DECLARE_FINAL_TYPE (MockInteraction, mock_interaction, MOCK, INTERACTION, GTlsInteraction)
-
-GTlsInteraction *mock_interaction_new_static_password       (const gchar *password);
-
-GTlsInteraction *mock_interaction_new_static_certificate    (GTlsCertificate *cert);
-
-GTlsInteraction *mock_interaction_new_static_error          (GQuark domain,
-                                                             gint code,
-                                                             const gchar *message);
-
-G_END_DECLS
+GInputStream *g_tls_request_uri (const char    *uri,
+                                 GCancellable  *cancellable,
+                                 GError       **error);

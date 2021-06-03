@@ -427,7 +427,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetSlotInfo)(CK_SLOT_ID slotID, CK_SLOT_INFO_PTR pIn
         if (CK_FALSE == pkcs11_mock_initialized)
                 return CKR_CRYPTOKI_NOT_INITIALIZED;
 
-        if (slotID > G_N_ELEMENTS (mock_slots))
+        if (slotID >= G_N_ELEMENTS (mock_slots))
                 return CKR_SLOT_ID_INVALID;
 
         if (NULL == pInfo)
@@ -468,7 +468,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetTokenInfo)(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR p
         pInfo->ulMaxSessionCount = token.ulMaxSessionCount;
         pInfo->ulSessionCount = (CK_TRUE == pkcs11_mock_session_opened) ? 1 : 0;
         pInfo->ulMaxRwSessionCount = token.ulMaxRwSessionCount;
-        pInfo->ulRwSessionCount = ((CK_TRUE == pkcs11_mock_session_opened) && ((CKS_RO_PUBLIC_SESSION != pkcs11_mock_session_state) || (CKS_RO_USER_FUNCTIONS != pkcs11_mock_session_state))) ? 1 : 0;
+        pInfo->ulRwSessionCount = (CK_TRUE == pkcs11_mock_session_opened) ? 1 : 0;
         pInfo->ulMaxPinLen = token.ulMaxPinLen;
         pInfo->ulMinPinLen = token.ulMinPinLen;
         pInfo->ulTotalPublicMemory = token.ulTotalPublicMemory;
@@ -946,8 +946,6 @@ CK_DEFINE_FUNCTION(CK_RV, C_CreateObject)(CK_SESSION_HANDLE hSession, CK_ATTRIBU
 
 CK_DEFINE_FUNCTION(CK_RV, C_CopyObject)(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hObject, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulCount, CK_OBJECT_HANDLE_PTR phNewObject)
 {
-        CK_ULONG i = 0;
-
         if (CK_FALSE == pkcs11_mock_initialized)
                 return CKR_CRYPTOKI_NOT_INITIALIZED;
 
@@ -959,18 +957,6 @@ CK_DEFINE_FUNCTION(CK_RV, C_CopyObject)(CK_SESSION_HANDLE hSession, CK_OBJECT_HA
 
         if (NULL == phNewObject)
                 return CKR_ARGUMENTS_BAD;
-
-        if ((NULL != pTemplate) && (0 >= ulCount))
-        {
-                for (i = 0; i < ulCount; i++)
-                {
-                        if (NULL == pTemplate[i].pValue)
-                                return CKR_ATTRIBUTE_VALUE_INVALID;
-
-                        if (0 >= pTemplate[i].ulValueLen)
-                                return CKR_ATTRIBUTE_VALUE_INVALID;
-                }
-        }
 
         *phNewObject = PKCS11_MOCK_CK_OBJECT_HANDLE_DATA;
 
@@ -1027,7 +1013,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_GetAttributeValue)(CK_SESSION_HANDLE hSession, CK_OB
         if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
                 return CKR_SESSION_HANDLE_INVALID;
 
-        if (hObject > G_N_ELEMENTS (mock_objects))
+        if (hObject >= G_N_ELEMENTS (mock_objects))
                 return CKR_OBJECT_HANDLE_INVALID;
 
         if (NULL == pTemplate)
@@ -1308,6 +1294,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_FindObjectsInit)(CK_SESSION_HANDLE hSession, CK_ATTR
                 else if (CKA_LABEL == pTemplate[i].type)
                 {
                         const char *cka_label_value = (char*)pTemplate[i].pValue;
+                        g_clear_pointer (&mock_search_template_label, g_free);
                         mock_search_template_label = g_strndup (cka_label_value, pTemplate[i].ulValueLen);
                 }
                 else
@@ -1971,7 +1958,7 @@ CK_DEFINE_FUNCTION(CK_RV, C_SignInit)(CK_SESSION_HANDLE hSession, CK_MECHANISM_P
         if ((CK_FALSE == pkcs11_mock_session_opened) || (PKCS11_MOCK_CK_SESSION_ID != hSession))
                 return CKR_SESSION_HANDLE_INVALID;
 
-        if (hKey > G_N_ELEMENTS(mock_objects) || mock_objects[hKey].object_class != CKO_PRIVATE_KEY)
+        if (hKey >= G_N_ELEMENTS(mock_objects) || mock_objects[hKey].object_class != CKO_PRIVATE_KEY)
                 return CKR_KEY_HANDLE_INVALID;
 
         if (NULL == pMechanism)
@@ -2798,9 +2785,6 @@ CK_DEFINE_FUNCTION(CK_RV, C_UnwrapKey)(CK_SESSION_HANDLE hSession, CK_MECHANISM_
 
 CK_DEFINE_FUNCTION(CK_RV, C_DeriveKey)(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hBaseKey, CK_ATTRIBUTE_PTR pTemplate, CK_ULONG ulAttributeCount, CK_OBJECT_HANDLE_PTR phKey)
 {
-        CK_ULONG i = 0;
-
-
         if (CK_FALSE == pkcs11_mock_initialized)
                 return CKR_CRYPTOKI_NOT_INITIALIZED;
 
@@ -2821,18 +2805,6 @@ CK_DEFINE_FUNCTION(CK_RV, C_DeriveKey)(CK_SESSION_HANDLE hSession, CK_MECHANISM_
 
         if (NULL == phKey)
                 return CKR_ARGUMENTS_BAD;
-
-        if ((NULL != pTemplate) && (0 >= ulAttributeCount))
-        {
-                for (i = 0; i < ulAttributeCount; i++)
-                {
-                        if (NULL == pTemplate[i].pValue)
-                                return CKR_ATTRIBUTE_VALUE_INVALID;
-
-                        if (0 >= pTemplate[i].ulValueLen)
-                                return CKR_ATTRIBUTE_VALUE_INVALID;
-                }
-        }
 
         *phKey = PKCS11_MOCK_CK_OBJECT_HANDLE_SECRET_KEY;
 

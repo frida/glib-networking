@@ -34,6 +34,7 @@
 #include <gnutls/x509.h>
 
 #include "gtlscertificate-gnutls.h"
+#include "gtlshttp.h"
 
 typedef struct
 {
@@ -43,7 +44,7 @@ typedef struct
    */
   GMutex mutex;
 
-  /* read-only after construct */
+  /* Read-only after construct, but still has to be protected by the mutex. */
   gnutls_x509_trust_list_t trust_list;
 
   /*
@@ -501,6 +502,7 @@ g_tls_database_gnutls_verify_chain (GTlsDatabase             *database,
   if (g_cancellable_set_error_if_cancelled (cancellable, error))
     return G_TLS_CERTIFICATE_GENERIC_ERROR;
 
+  g_mutex_lock (&priv->mutex);
   g_assert (!priv->verify_chain_cancellable);
   priv->verify_chain_cancellable = cancellable;
   gnutls_chain = convert_certificate_chain_to_gnutls (G_TLS_CERTIFICATE_GNUTLS (chain));
@@ -508,6 +510,7 @@ g_tls_database_gnutls_verify_chain (GTlsDatabase             *database,
                                             gnutls_chain->chain, gnutls_chain->length,
                                             0, &gnutls_result, NULL);
   priv->verify_chain_cancellable = NULL;
+  g_mutex_unlock (&priv->mutex);
 
   if (gerr != 0 || g_cancellable_set_error_if_cancelled (cancellable, error))
     {
@@ -593,8 +596,7 @@ issuer_missing_cb (gnutls_x509_trust_list_t   tlist,
   GTlsDatabaseGnutls *self = gnutls_x509_trust_list_get_ptr (tlist);
   GTlsDatabaseGnutlsPrivate *priv = g_tls_database_gnutls_get_instance_private (self);
   gnutls_datum_t datum;
-  GFile *file = NULL;
-  GFileInputStream *istream = NULL;
+  GInputStream *istream = NULL;
   char *aia = NULL;
   char *scheme = NULL;
   int gerr;
@@ -609,6 +611,8 @@ issuer_missing_cb (gnutls_x509_trust_list_t   tlist,
    * Authority Information Access, RFC 5280 §4.2.2.1. Also see:
    * https://blogs.gnome.org/mcatanzaro/2015/01/30/mozilla-is-responsible-for-the-redhat-corpmerchandise-com-fiasco/
    */
+
+  /* Note: priv->mutex is already locked by g_tls_database_gnutls_verify_chain(). */
 
   for (int i = 0; ; i++)
     {
@@ -655,11 +659,10 @@ issuer_missing_cb (gnutls_x509_trust_list_t   tlist,
       goto out;
     }
 
-  file = g_file_new_for_uri (aia);
-  istream = g_file_read (file, priv->verify_chain_cancellable, &error);
+  istream = g_tls_request_uri (aia, priv->verify_chain_cancellable, &error);
   if (!istream)
     {
-      g_warning ("Failed to download missing issuer certificate from Authority Information Access URI %s: failed g_file_read (do you need to install gvfs?): %s",
+      g_warning ("Failed to download missing issuer certificate from Authority Information Access URI %s: %s",
                  aia, error->message);
       goto out;
     }
@@ -667,7 +670,7 @@ issuer_missing_cb (gnutls_x509_trust_list_t   tlist,
   der = g_byte_array_sized_new (sizeof (buffer));
   do
     {
-      n_read = g_input_stream_read (G_INPUT_STREAM (istream), buffer, sizeof (buffer),
+      n_read = g_input_stream_read (istream, buffer, sizeof (buffer),
                                     priv->verify_chain_cancellable, &error);
       if (n_read == -1)
         {
@@ -696,13 +699,12 @@ issuer_missing_cb (gnutls_x509_trust_list_t   tlist,
 out:
   if (error)
     g_error_free (error);
-  if (file)
-    g_object_unref (file);
   if (istream)
     g_object_unref (istream);
   if (der)
     g_byte_array_unref (der);
   gnutls_free (datum.data);
+  g_free (scheme);
   g_free (aia);
   return ret;
 }
