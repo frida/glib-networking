@@ -36,6 +36,7 @@
  * SEC_OS_OSX: https://github.com/Apple-FOSS-Mirror/Security/blob/master/base/SecBase.h
  */
 #ifdef __APPLE__
+#include <dlfcn.h>
 #include <Security/Security.h>
 #else
 #define SEC_OS_OSX 0
@@ -158,16 +159,103 @@ g_tls_database_openssl_verify_chain (GTlsDatabase             *database,
 }
 
 #if SEC_OS_OSX
+
+typedef struct
+{
+  void (*release) (CFTypeRef);
+
+  Boolean (*number_get_value) (CFNumberRef, CFNumberType, void *);
+
+  CFStringRef (* string_create) (CFAllocatorRef, const char *, CFStringEncoding);
+  CFComparisonResult (*string_compare) (CFStringRef, CFStringRef, CFStringCompareFlags);
+
+  const UInt8 *(*data_get_byte_ptr) (CFDataRef);
+  CFIndex (*data_get_length) (CFDataRef);
+
+  CFIndex (*array_get_count) (CFArrayRef);
+  const void * (*array_get_value_at_index) (CFArrayRef, CFIndex);
+
+  Boolean (*dict_get_value_if_present) (CFDictionaryRef, const void *, const void **);
+
+  OSStatus (*sts_copy_certificates) (SecTrustSettingsDomain, CFArrayRef *);
+  OSStatus (*sts_copy_trust_settings) (SecCertificateRef, SecTrustSettingsDomain, CFArrayRef *);
+  CFDataRef (*certificate_copy_data) (SecCertificateRef);
+
+  CFStringRef k_sts_settings_policy_string;
+  CFStringRef k_sts_result;
+  CFStringRef k_ssl_server;
+} GTlsAppleApi;
+
+static gboolean
+g_tls_apple_api_try_init (GTlsAppleApi * api)
+{
+  void *security, *cf;
+
+  security = dlopen ("/System/Library/Frameworks/Security.framework/Security",
+                     RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
+  if (!security)
+    return FALSE;
+
+  cf = dlopen ("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
+               RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
+
+#define LOAD_SYMBOL(handle, field, symbol) G_STMT_START \
+  { \
+    api->field = dlsym ((handle), (symbol)); \
+    g_assert (api->field); \
+  } \
+G_STMT_END
+
+  LOAD_SYMBOL (cf, release, "CFRelease");
+  LOAD_SYMBOL (cf, number_get_value, "CFNumberGetValue");
+
+  LOAD_SYMBOL (cf, string_create, "CFStringCreateWithCString");
+  LOAD_SYMBOL (cf, string_compare, "CFStringCompare");
+
+  LOAD_SYMBOL (cf, data_get_byte_ptr, "CFDataGetBytePtr");
+  LOAD_SYMBOL (cf, data_get_length, "CFDataGetLength");
+
+  LOAD_SYMBOL (cf, array_get_count, "CFArrayGetCount");
+  LOAD_SYMBOL (cf, array_get_value_at_index, "CFArrayGetValueAtIndex");
+
+  LOAD_SYMBOL (cf, dict_get_value_if_present, "CFDictionaryGetValueIfPresent");
+
+  LOAD_SYMBOL (security, sts_copy_certificates, "SecTrustSettingsCopyCertificates");
+  LOAD_SYMBOL (security, sts_copy_trust_settings, "SecTrustSettingsCopyTrustSettings");
+  LOAD_SYMBOL (security, certificate_copy_data, "SecCertificateCopyData");
+
+#undef LOAD_SYMBOL
+
+  api->k_sts_settings_policy_string = api->string_create (NULL, "kSecTrustSettingsPolicyString",
+                                                          kCFStringEncodingUTF8);
+  api->k_sts_result = api->string_create (NULL, "kSecTrustSettingsResult", kCFStringEncodingUTF8);
+  api->k_ssl_server = api->string_create (NULL, "sslServer", kCFStringEncodingUTF8);
+
+  dlclose (cf);
+  dlclose (security);
+
+  return TRUE;
+}
+
+static void
+g_tls_apple_api_destroy (GTlsAppleApi * api)
+{
+  api->release (api->k_ssl_server);
+  api->release (api->k_sts_result);
+  api->release (api->k_sts_settings_policy_string);
+}
+
 static gboolean
 is_certificate_trusted (SecCertificateRef       *cert,
                         SecTrustSettingsDomain   domain,
+                        GTlsAppleApi            *api,
                         GError                 **error)
 {
   CFArrayRef cert_trust_settings;
   OSStatus ret;
   CFIndex i;
 
-  ret = SecTrustSettingsCopyTrustSettings (*cert, domain, &cert_trust_settings);
+  ret = api->sts_copy_trust_settings (*cert, domain, &cert_trust_settings);
   if (ret != errSecSuccess)
     {
       g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
@@ -175,33 +263,33 @@ is_certificate_trusted (SecCertificateRef       *cert,
       return FALSE;
     }
 
-  for (i = 0; i < CFArrayGetCount (cert_trust_settings); i++)
+  for (i = 0; i < api->array_get_count (cert_trust_settings); i++)
     {
       CFDictionaryRef trust_settings;
       CFNumberRef trust_setting_number;
       CFStringRef policy_name;
 
       /* Ignore trust settings which are not SSL policies. */
-      trust_settings = (CFDictionaryRef)CFArrayGetValueAtIndex (cert_trust_settings, i);
-      if (CFDictionaryGetValueIfPresent (trust_settings, kSecTrustSettingsPolicyString, 
-                                         (const void **)&policy_name) &&
-          CFStringCompare (policy_name, CFSTR ("sslServer"), 0) != kCFCompareEqualTo)
+      trust_settings = (CFDictionaryRef)api->array_get_value_at_index (cert_trust_settings, i);
+      if (api->dict_get_value_if_present (trust_settings, api->k_sts_settings_policy_string,
+                                          (const void **)&policy_name) &&
+          api->string_compare (policy_name, api->k_ssl_server, 0) != kCFCompareEqualTo)
         {
           continue;
         }
 
-      if (CFDictionaryGetValueIfPresent (trust_settings, kSecTrustSettingsResult, 
-                                         (const void **)&trust_setting_number))
+      if (api->dict_get_value_if_present (trust_settings, api->k_sts_result,
+                                          (const void **)&trust_setting_number))
         {
           SecTrustSettingsResult trustSettingResult;
 
           if (trust_setting_number == NULL)
             {
-              CFRelease (cert_trust_settings);
+              api->release (cert_trust_settings);
               return TRUE;
             }
 
-          CFNumberGetValue (trust_setting_number, kCFNumberIntType, &trustSettingResult);
+          api->number_get_value (trust_setting_number, kCFNumberIntType, &trustSettingResult);
           /* kSecTrustSettingsResultUnspecified means neither trusted nor distrusted.  
            * kSecTrustSettingsResultInvalid should not be a possible value for trustSettingResult.
            * 
@@ -210,13 +298,13 @@ is_certificate_trusted (SecCertificateRef       *cert,
           if (trustSettingResult != kSecTrustSettingsResultUnspecified && 
               trustSettingResult != kSecTrustSettingsResultInvalid)
             {
-              CFRelease (cert_trust_settings);
+              api->release (cert_trust_settings);
               return trustSettingResult != kSecTrustSettingsResultDeny;
             }
         }
      }
 
-  CFRelease (cert_trust_settings);
+  api->release (cert_trust_settings);
 
   /* We only reach here if the trust settings array is empty or trust setting parameter for 
    * a certificate is NULL. The documentation state that we should trust these certificates
@@ -234,12 +322,18 @@ static gboolean
 populate_store (X509_STORE  *store,
                 GError     **error)
 {
+  gboolean result = FALSE;
+  GTlsAppleApi api;
   SecTrustSettingsDomain domains[] = { kSecTrustSettingsDomainUser, 
                                        kSecTrustSettingsDomainAdmin, 
                                        kSecTrustSettingsDomainSystem };
-  GHashTable *trusted_certs = g_hash_table_new_full (g_bytes_hash, g_bytes_equal, 
-                                                     (GDestroyNotify)g_bytes_unref, NULL);
-  gboolean result = FALSE;
+  GHashTable *trusted_certs;
+
+  if (!g_tls_apple_api_try_init (&api))
+    return TRUE;
+
+  trusted_certs = g_hash_table_new_full (g_bytes_hash, g_bytes_equal, 
+                                         (GDestroyNotify)g_bytes_unref, NULL);
 
   for (int i = 0; i < G_N_ELEMENTS (domains); i++)
    {
@@ -248,7 +342,7 @@ populate_store (X509_STORE  *store,
       OSStatus ret;
       CFIndex j;
 
-      ret = SecTrustSettingsCopyCertificates (domain, &domain_certs);
+      ret = api.sts_copy_certificates (domain, &domain_certs);
       if (ret == errSecNoTrustSettings)
         {
           g_debug ("Domain %d was skipped as no trust settings were found", domain);
@@ -262,7 +356,7 @@ populate_store (X509_STORE  *store,
           goto out;
         }
 
-      for (j = 0; j < CFArrayGetCount (domain_certs); j++)
+      for (j = 0; j < api.array_get_count (domain_certs); j++)
         {
           SecCertificateRef cert;
           CFDataRef data;
@@ -270,27 +364,27 @@ populate_store (X509_STORE  *store,
           GBytes *cert_bytes;
           const unsigned char *pdata;
 
-          cert = (SecCertificateRef)CFArrayGetValueAtIndex (domain_certs, j);
-          if (!is_certificate_trusted (&cert, domain, error))
+          cert = (SecCertificateRef)api.array_get_value_at_index (domain_certs, j);
+          if (!is_certificate_trusted (&cert, domain, &api, error))
             {
               continue;
             }
 
-          data = SecCertificateCopyData (cert);
+          data = api.certificate_copy_data (cert);
           if (data == NULL)
             {
               continue;
             }
 
-          pdata = (const unsigned char *)CFDataGetBytePtr (data);
-          cert_x509 = d2i_X509 (NULL, &pdata, CFDataGetLength (data));
+          pdata = (const unsigned char *)api.data_get_byte_ptr (data);
+          cert_x509 = d2i_X509 (NULL, &pdata, api.data_get_length (data));
           if (cert_x509 == NULL)
             {
-              CFRelease (data);
+              api.release (data);
               continue;
             }
 
-          cert_bytes = g_bytes_new (CFDataGetBytePtr (data), CFDataGetLength (data));
+          cert_bytes = g_bytes_new (api.data_get_byte_ptr (data), api.data_get_length (data));
           if (cert_bytes == NULL)
             {
               goto next;
@@ -306,16 +400,17 @@ populate_store (X509_STORE  *store,
 
         next:
           X509_free (cert_x509);
-          CFRelease (data);
+          api.release (data);
         }
 
-      CFRelease (domain_certs);
+      api.release (domain_certs);
     }
 
   result = TRUE;
 
 out:  
   g_hash_table_unref (trusted_certs);
+  g_tls_apple_api_destroy (&api);
 
   return result;
 }
