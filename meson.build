@@ -33,6 +33,9 @@ common_flags = [
   '-DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_70'
 ]
 
+# old versions of glibc require this for resolv.h, which gets included by gio/gnetworking.h
+common_flags += '-D_GNU_SOURCE'
+
 ndebug = get_option('b_ndebug')
 if ndebug == 'true' or (ndebug == 'if-release' and not get_option('debug'))
   common_flags += [
