@@ -32,7 +32,6 @@
 #include "openssl-include.h"
 
 #ifdef __APPLE__
-#include <dlfcn.h>
 #include <Security/Security.h>
 #endif
 
@@ -187,39 +186,11 @@ g_tls_database_openssl_populate_trust_list (GTlsDatabaseOpenssl  *self,
                                             GError              **error)
 {
 #ifdef __APPLE__
-  void *security, *cf;
-  OSStatus (*copy_anchor_certificates) (CFArrayRef _Nullable *anchors);
-  CFDataRef (*certificate_copy_data) (SecCertificateRef certificate);
-  CFIndex (*array_get_count) (CFArrayRef array);
-  const void *(*array_get_value_at_index) (CFArrayRef array, CFIndex idx);
-  const UInt8 *(*data_get_byte_ptr) (CFDataRef data);
-  CFIndex (*data_get_length) (CFDataRef data);
-  void (*release) (CFTypeRef cf);
   CFArrayRef anchors;
   OSStatus ret;
-  CFIndex n, i;
+  CFIndex i;
 
-  security = dlopen ("/System/Library/Frameworks/Security.framework/Security",
-                     RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
-  if (!security)
-    goto not_loaded;
-
-  cf = dlopen ("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
-               RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
-
-  copy_anchor_certificates = dlsym (security, "SecTrustCopyAnchorCertificates");
-  certificate_copy_data = dlsym (security, "SecCertificateCopyData");
-
-  array_get_count = dlsym (cf, "CFArrayGetCount");
-  array_get_value_at_index = dlsym (cf, "CFArrayGetValueAtIndex");
-  data_get_byte_ptr = dlsym (cf, "CFDataGetBytePtr");
-  data_get_length = dlsym (cf, "CFDataGetLength");
-  release = dlsym (cf, "CFRelease");
-
-  dlclose (cf);
-  dlclose (security);
-
-  ret = copy_anchor_certificates (&anchors);
+  ret = SecTrustCopyAnchorCertificates (&anchors);
   if (ret != errSecSuccess)
     {
       g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
@@ -227,32 +198,29 @@ g_tls_database_openssl_populate_trust_list (GTlsDatabaseOpenssl  *self,
       return FALSE;
     }
 
-  n = array_get_count (anchors);
-  for (i = 0; i < n; i++)
+  for (i = 0; i < CFArrayGetCount (anchors); i++)
     {
       SecCertificateRef cert;
       CFDataRef data;
 
-      cert = (SecCertificateRef)array_get_value_at_index (anchors, i);
-      data = certificate_copy_data (cert);
+      cert = (SecCertificateRef)CFArrayGetValueAtIndex (anchors, i);
+      data = SecCertificateCopyData (cert);
       if (data)
         {
           X509 *x;
           const unsigned char *pdata;
 
-          pdata = (const unsigned char *)data_get_byte_ptr (data);
+          pdata = (const unsigned char *)CFDataGetBytePtr (data);
 
-          x = d2i_X509 (NULL, &pdata, data_get_length (data));
+          x = d2i_X509 (NULL, &pdata, CFDataGetLength (data));
           if (x)
             X509_STORE_add_cert (store, x);
 
-          release (data);
+          CFRelease (data);
         }
     }
 
-  release (anchors);
-
-not_loaded:
+  CFRelease (anchors);
 #endif
 
   if (!X509_STORE_set_default_paths (store))
@@ -343,4 +311,100 @@ g_tls_database_openssl_new (GError **error)
   g_return_val_if_fail (!error || !*error, NULL);
 
   return g_initable_new (G_TYPE_TLS_DATABASE_OPENSSL, NULL, error, NULL);
+}
+
+GTlsCertificateFlags
+g_tls_database_openssl_verify_ocsp_response (GTlsDatabaseOpenssl *self,
+                                             GTlsCertificate     *chain,
+                                             OCSP_RESPONSE       *resp)
+{
+  GTlsCertificateFlags errors = 0;
+#if (OPENSSL_VERSION_NUMBER >= 0x0090808fL) && !defined(OPENSSL_NO_TLSEXT) && \
+  !defined(OPENSSL_NO_OCSP)
+  GTlsDatabaseOpensslPrivate *priv;
+  STACK_OF(X509) *chain_openssl = NULL;
+  OCSP_BASICRESP *basic_resp = NULL;
+  int ocsp_status = 0;
+  int i;
+
+  ocsp_status = OCSP_response_status (resp);
+  if (ocsp_status != OCSP_RESPONSE_STATUS_SUCCESSFUL)
+    {
+      errors = G_TLS_CERTIFICATE_GENERIC_ERROR;
+      goto end;
+    }
+
+  basic_resp = OCSP_response_get1_basic (resp);
+  if (basic_resp == NULL)
+    {
+      errors = G_TLS_CERTIFICATE_GENERIC_ERROR;
+      goto end;
+    }
+
+  chain_openssl = convert_certificate_chain_to_openssl (G_TLS_CERTIFICATE_OPENSSL (chain));
+  priv = g_tls_database_openssl_get_instance_private (self);
+  if ((chain_openssl == NULL) ||
+      (priv->store == NULL))
+    {
+      errors = G_TLS_CERTIFICATE_GENERIC_ERROR;
+      goto end;
+    }
+
+  if (OCSP_basic_verify (basic_resp, chain_openssl, priv->store, 0) <= 0)
+    {
+      errors = G_TLS_CERTIFICATE_GENERIC_ERROR;
+      goto end;
+    }
+
+  for (i = 0; i < OCSP_resp_count (basic_resp); i++)
+    {
+      OCSP_SINGLERESP *single_resp = OCSP_resp_get0 (basic_resp, i);
+      ASN1_GENERALIZEDTIME *revocation_time = NULL;
+      ASN1_GENERALIZEDTIME *this_update_time = NULL;
+      ASN1_GENERALIZEDTIME *next_update_time = NULL;
+      int crl_reason = 0;
+      int cert_status = 0;
+
+      if (single_resp == NULL)
+        continue;
+
+      cert_status = OCSP_single_get0_status (single_resp,
+                                             &crl_reason,
+                                             &revocation_time,
+                                             &this_update_time,
+                                             &next_update_time);
+      if (!OCSP_check_validity (this_update_time,
+                                next_update_time,
+                                300L,
+                                -1L))
+        {
+          errors = G_TLS_CERTIFICATE_GENERIC_ERROR;
+          goto end;
+        }
+
+      switch (cert_status)
+        {
+        case V_OCSP_CERTSTATUS_GOOD:
+          break;
+        case V_OCSP_CERTSTATUS_REVOKED:
+          errors = G_TLS_CERTIFICATE_REVOKED;
+          goto end;
+        case V_OCSP_CERTSTATUS_UNKNOWN:
+          errors = G_TLS_CERTIFICATE_GENERIC_ERROR;
+          goto end;
+        }
+    }
+
+end:
+  if (chain_openssl)
+    sk_X509_free (chain_openssl);
+
+  if (basic_resp)
+    OCSP_BASICRESP_free (basic_resp);
+
+  if (resp)
+    OCSP_RESPONSE_free (resp);
+
+#endif
+  return errors;
 }

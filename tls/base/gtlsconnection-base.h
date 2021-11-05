@@ -58,10 +58,10 @@ struct _GTlsConnectionBaseClass
 {
   GTlsConnectionClass parent_class;
 
-  void                        (*prepare_handshake)          (GTlsConnectionBase   *tls,
-                                                             gchar               **advertised_protocols);
+  void                        (*prepare_handshake)          (GTlsConnectionBase       *tls,
+                                                             gchar                   **advertised_protocols);
   GTlsSafeRenegotiationStatus (*handshake_thread_safe_renegotiation_status)
-                                                            (GTlsConnectionBase    *tls);
+                                                            (GTlsConnectionBase        *tls);
   GTlsConnectionBaseStatus    (*handshake_thread_request_rehandshake)
                                                             (GTlsConnectionBase   *tls,
                                                              gint64                timeout,
@@ -72,9 +72,22 @@ struct _GTlsConnectionBaseClass
                                                              GCancellable         *cancellable,
                                                              GError              **error);
   GTlsCertificate            *(*retrieve_peer_certificate)  (GTlsConnectionBase   *tls);
+  GTlsCertificateFlags        (*verify_chain)               (GTlsConnectionBase       *tls,
+                                                             GTlsCertificate          *chain,
+                                                             const gchar              *purpose,
+                                                             GSocketConnectable       *identity,
+                                                             GTlsInteraction          *interaction,
+                                                             GTlsDatabaseVerifyFlags   flags,
+                                                             GCancellable             *cancellable,
+                                                             GError                  **error);
+  GTlsCertificateFlags        (*verify_peer_certificate)    (GTlsConnectionBase   *tls,
+                                                             GTlsCertificate      *certificate,
+                                                             GTlsCertificateFlags  flags);
   void                        (*complete_handshake)         (GTlsConnectionBase   *tls,
                                                              gboolean              handshake_succeeded,
                                                              gchar               **negotiated_protocol,
+                                                             GTlsProtocolVersion  *protocol_version,
+                                                             gchar               **ciphersuite_name,
                                                              GError              **error);
 
   gboolean                    (*is_session_resumed)         (GTlsConnectionBase   *tls);

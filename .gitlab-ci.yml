@@ -1,4 +1,4 @@
-image: registry.gitlab.gnome.org/gnome/glib-networking/master:v17
+image: registry.gitlab.gnome.org/gnome/glib-networking/master:v19
 
 fedora-x86_64:
   stage: build
@@ -6,7 +6,9 @@ fedora-x86_64:
     # Remove for PKCS11 logs, otherwise generates a lot of noise hitting gitlab's limit
     PKCS11SPY_PATH: disabled
   script:
+    - cp .gitlab-ci/lcovrc ~/.lcovrc
     - meson --prefix=$HOME/glib-networking-installed
+            -Db_coverage=true
             -Dgnutls=enabled
             -Dopenssl=enabled
             -Dlibproxy=enabled
@@ -14,12 +16,15 @@ fedora-x86_64:
             -Dwerror=true
             _build/
     - meson compile -C _build/
-    - meson test -v -C _build/ --repeat=500
+    - meson test -v -C _build/ --repeat=1000
     - meson install -C _build/
+    - ninja -C _build coverage-html
   artifacts:
     paths:
       - _build/test-results
-    when: on_failure
+      - _build/meson-logs/coveragereport
+    when: always
+  coverage: '/^\s+lines\.+:\s+([\d.]+\%)\s+/'
 
 fedora-x86_64-asan:
   tags: [ asan ]
@@ -58,15 +63,15 @@ fedora-x86_64-scan-build:
       - _build/meson-logs/scanbuild
     when: on_failure
 
-vs2017-x64:
-  stage: build
-  except:
-    - tags
-  tags:
-    - win32-ps
-  script:
-    - .gitlab-ci/test-msvc.bat
-  artifacts:
-    paths:
-      - build/test-results
-    when: on_failure
+#vs2017-x64:
+#  stage: build
+#  except:
+#    - tags
+#  tags:
+#    - win32-ps
+#  script:
+#    - .gitlab-ci/test-msvc.bat
+#  artifacts:
+#    paths:
+#      - build/test-results
+#    when: on_failure

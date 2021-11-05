@@ -24,6 +24,8 @@
  * Author: Stef Walter <stefw@collabora.co.uk>
  */
 
+#include "certificate.h"
+
 #include <gio/gio.h>
 
 #ifdef BACKEND_IS_GNUTLS
@@ -65,7 +67,10 @@ typedef struct {
   GByteArray *cert_der;
   gchar *key_pem;
   gsize key_pem_length;
+  gchar *key_pem_pkcs8;
+  gsize key_pem_pkcs8_length;
   GByteArray *key_der;
+  GByteArray *key_der_pkcs8;
 } TestCertificate;
 
 static void
@@ -94,12 +99,24 @@ setup_certificate (TestCertificate *test, gconstpointer data)
                        &test->key_pem_length, &error);
   g_assert_no_error (error);
 
+  g_file_get_contents (tls_test_file_path ("server-key-pkcs8.pem"), &test->key_pem_pkcs8,
+                       &test->key_pem_pkcs8_length, &error);
+  g_assert_no_error (error);
+
   g_file_get_contents (tls_test_file_path ("server-key.der"),
                        &contents, &length, &error);
   g_assert_no_error (error);
 
   test->key_der = g_byte_array_new ();
   g_byte_array_append (test->key_der, (guint8 *)contents, length);
+  g_free (contents);
+
+  g_file_get_contents (tls_test_file_path ("server-key-pkcs8.der"),
+                       &contents, &length, &error);
+  g_assert_no_error (error);
+
+  test->key_der_pkcs8 = g_byte_array_new ();
+  g_byte_array_append (test->key_der_pkcs8, (guint8 *)contents, length);
   g_free (contents);
 }
 
@@ -111,7 +128,9 @@ teardown_certificate (TestCertificate *test,
   g_byte_array_free (test->cert_der, TRUE);
 
   g_free (test->key_pem);
+  g_free (test->key_pem_pkcs8);
   g_byte_array_free (test->key_der, TRUE);
+  g_byte_array_free (test->key_der_pkcs8, TRUE);
 }
 
 static void
@@ -264,6 +283,63 @@ test_create_certificate_pkcs11 (TestCertificate *test,
 
   g_assert_no_error (error);
   g_assert_nonnull (cert);
+#endif
+}
+
+static void
+test_private_key (TestCertificate *test,
+                  gconstpointer    data)
+{
+  GTlsCertificate *cert;
+  GByteArray *der;
+  char *pem;
+  GError *error = NULL;
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("server-and-key.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_true (G_IS_TLS_CERTIFICATE (cert));
+
+  g_object_get (cert,
+                "private-key", &der,
+                "private-key-pem", &pem,
+                NULL);
+  g_assert_cmpmem (der->data, der->len, test->key_der_pkcs8->data, test->key_der_pkcs8->len);
+  g_assert_cmpstr (pem, ==, test->key_pem_pkcs8);
+
+  g_byte_array_unref (der);
+  g_free (pem);
+  g_object_unref (cert);
+}
+
+static void
+test_private_key_pkcs11 (TestCertificate *test,
+                         gconstpointer    data)
+{
+#if !defined (BACKEND_IS_GNUTLS)
+  g_test_skip ("This backend does not support PKCS #11");
+#else
+  GTlsCertificate *cert;
+  GByteArray *der;
+  char *pem;
+  GError *error = NULL;
+
+  cert = g_initable_new (test->cert_gtype, NULL, &error,
+                         "pkcs11-uri", "pkcs11:model=mock;token=Mock%20Certificate;object=Mock%20Certificate",
+                         NULL);
+  g_assert_no_error (error);
+  g_assert_true (G_IS_TLS_CERTIFICATE (cert));
+
+  /* Cannot access private key because the GTlsCertificate only knows its
+   * PKCS #11 handle. It doesn't actually have the private key in memory.
+   */
+  g_object_get (cert,
+                "private-key", &der,
+                "private-key-pem", &pem,
+                NULL);
+  g_assert_null (der);
+  g_assert_null (pem);
+
+  g_object_unref (cert);
 #endif
 }
 
@@ -579,8 +655,6 @@ test_certificate_is_same (void)
 static void
 test_certificate_not_valid_before (void)
 {
-  const gchar *EXPECTED_NOT_VALID_BEFORE = "2020-10-12T17:49:44Z";
-
   GTlsCertificate *cert;
   GError *error = NULL;
   GDateTime *actual;
@@ -598,11 +672,15 @@ test_certificate_not_valid_before (void)
   g_object_unref (cert);
 }
 
+/* On 32-bit, GNUTLS caps expiry times at 2037-12-31 23:23:23 to avoid
+ * overflowing time_t. Hopefully by 2037, either 32-bit will finally have
+ * died out, or GNUTLS will rethink its approach to
+ * https://gitlab.com/gnutls/gnutls/-/issues/370 */
+#define GNUTLS_32_BIT_NOT_VALID_AFTER_MAX 2145914603
+
 static void
 test_certificate_not_valid_after (void)
 {
-  const gchar *EXPECTED_NOT_VALID_AFTER = "2045-10-06T17:49:44Z";
-
   GTlsCertificate *cert;
   GError *error = NULL;
   GDateTime *actual;
@@ -614,7 +692,16 @@ test_certificate_not_valid_after (void)
   actual = g_tls_certificate_get_not_valid_after (cert);
   g_assert_nonnull (actual);
   actual_str = g_date_time_format_iso8601 (actual);
+
+#if SIZEOF_TIME_T <= 4
+  if (g_date_time_to_unix (actual) == GNUTLS_32_BIT_NOT_VALID_AFTER_MAX)
+    g_test_incomplete ("not-valid-after date not representable on 32-bit");
+  else
+    g_assert_cmpstr (actual_str, ==, EXPECTED_NOT_VALID_AFTER);
+#else
   g_assert_cmpstr (actual_str, ==, EXPECTED_NOT_VALID_AFTER);
+#endif
+
   g_free (actual_str);
   g_date_time_unref (actual);
   g_object_unref (cert);
@@ -623,8 +710,7 @@ test_certificate_not_valid_after (void)
 static void
 test_certificate_subject_name (void)
 {
-  const gchar *EXPECTED_SUBJECT_NAME = "DC=COM,DC=EXAMPLE,CN=server.example.com";
-
+  const char *EXPECTED_SUBJECT_NAME = "DC=COM,DC=EXAMPLE,CN=server.example.com";
   GTlsCertificate *cert;
   GError *error = NULL;
   gchar *actual;
@@ -655,6 +741,51 @@ test_certificate_issuer_name (void)
   // OpenSSL includes ",emailAddress=ca@example.com" at the end
   g_assert (strstr (actual, "DC=COM,DC=EXAMPLE,OU=Certificate Authority,CN=ca.example.com"));
   g_free (actual);
+  g_object_unref (cert);
+}
+
+static void
+test_certificate_dns_names (void)
+{
+  GTlsCertificate *cert;
+  GError *error = NULL;
+  GPtrArray *actual;
+  const gchar *dns_name = "server.example.com";
+  GBytes *expected = g_bytes_new_static (dns_name, strlen (dns_name));
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("server.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (cert);
+
+  actual = g_tls_certificate_get_dns_names (cert);
+  g_assert_nonnull (actual);
+  g_assert_cmpuint (actual->len, ==, 1);
+  g_assert_true (g_ptr_array_find_with_equal_func (actual, expected, (GEqualFunc)g_bytes_equal, NULL));
+
+  g_ptr_array_free (actual, TRUE);
+  g_bytes_unref (expected);
+  g_object_unref (cert);
+}
+
+static void
+test_certificate_ip_addresses (void)
+{
+  GTlsCertificate *cert;
+  GError *error = NULL;
+  GPtrArray *actual;
+  GInetAddress *expected = g_inet_address_new_from_string ("192.168.1.10");
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("server.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (cert);
+
+  actual = g_tls_certificate_get_ip_addresses (cert);
+  g_assert_nonnull (actual);
+  g_assert_cmpuint (actual->len, ==, 1);
+  g_assert_true (g_ptr_array_find_with_equal_func (actual, expected, (GEqualFunc)g_inet_address_equal, NULL));
+
+  g_ptr_array_free (actual, TRUE);
+  g_object_unref (expected);
   g_object_unref (cert);
 }
 
@@ -695,6 +826,10 @@ main (int   argc,
               setup_certificate, test_create_certificate_with_garbage_input, teardown_certificate);
   g_test_add ("/tls/" BACKEND "/certificate/pkcs11", TestCertificate, NULL,
               setup_certificate, test_create_certificate_pkcs11, teardown_certificate);
+  g_test_add ("/tls/" BACKEND "/certificate/private-key", TestCertificate, NULL,
+              setup_certificate, test_private_key, teardown_certificate);
+  g_test_add ("/tls/" BACKEND "/certificate/private-key-pkcs11", TestCertificate, NULL,
+              setup_certificate, test_private_key_pkcs11, teardown_certificate);
 
   g_test_add_func ("/tls/" BACKEND "/certificate/create-chain", test_create_certificate_chain);
   g_test_add_func ("/tls/" BACKEND "/certificate/create-no-chain", test_create_certificate_no_chain);
@@ -720,6 +855,8 @@ main (int   argc,
   g_test_add_func ("/tls/" BACKEND "/certificate/not-valid-after", test_certificate_not_valid_after);
   g_test_add_func ("/tls/" BACKEND "/certificate/subject-name", test_certificate_subject_name);
   g_test_add_func ("/tls/" BACKEND "/certificate/issuer-name", test_certificate_issuer_name);
+  g_test_add_func ("/tls/" BACKEND "/certificate/dns-names", test_certificate_dns_names);
+  g_test_add_func ("/tls/" BACKEND "/certificate/ip-addresses", test_certificate_ip_addresses);
 
   return g_test_run();
 }

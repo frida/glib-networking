@@ -35,6 +35,7 @@
 
 #include "gtlscertificate-gnutls.h"
 #include "gtlshttp.h"
+#include "gtlsgnutls-version.h"
 
 typedef struct
 {
@@ -67,9 +68,6 @@ typedef struct
    * string handles. This array is populated on demand.
    */
   GHashTable *handles;
-
-  /* Unowned. This is only set temporarily, during certificate verification. */
-  GCancellable *verify_chain_cancellable;
 } GTlsDatabaseGnutlsPrivate;
 
 static void g_tls_database_gnutls_initable_interface_init (GInitableIface *iface);
@@ -223,8 +221,6 @@ g_tls_database_gnutls_finalize (GObject *object)
 {
   GTlsDatabaseGnutls *self = G_TLS_DATABASE_GNUTLS (object);
   GTlsDatabaseGnutlsPrivate *priv = g_tls_database_gnutls_get_instance_private (self);
-
-  g_assert (!priv->verify_chain_cancellable);
 
   g_clear_pointer (&priv->subjects, g_hash_table_destroy);
   g_clear_pointer (&priv->issuers, g_hash_table_destroy);
@@ -491,8 +487,6 @@ g_tls_database_gnutls_verify_chain (GTlsDatabase             *database,
   GTlsCertificateFlags result;
   guint gnutls_result;
   CertificateChain *gnutls_chain;
-  const char *hostname = NULL;
-  char *free_hostname = NULL;
   int gerr;
 
   g_return_val_if_fail (G_IS_TLS_CERTIFICATE_GNUTLS (chain),
@@ -503,13 +497,10 @@ g_tls_database_gnutls_verify_chain (GTlsDatabase             *database,
     return G_TLS_CERTIFICATE_GENERIC_ERROR;
 
   g_mutex_lock (&priv->mutex);
-  g_assert (!priv->verify_chain_cancellable);
-  priv->verify_chain_cancellable = cancellable;
   gnutls_chain = convert_certificate_chain_to_gnutls (G_TLS_CERTIFICATE_GNUTLS (chain));
   gerr = gnutls_x509_trust_list_verify_crt (priv->trust_list,
                                             gnutls_chain->chain, gnutls_chain->length,
                                             0, &gnutls_result, NULL);
-  priv->verify_chain_cancellable = NULL;
   g_mutex_unlock (&priv->mutex);
 
   if (gerr != 0 || g_cancellable_set_error_if_cancelled (cancellable, error))
@@ -520,23 +511,10 @@ g_tls_database_gnutls_verify_chain (GTlsDatabase             *database,
 
   result = g_tls_certificate_gnutls_convert_flags (gnutls_result);
 
-  if (G_IS_NETWORK_ADDRESS (identity))
-    hostname = g_network_address_get_hostname (G_NETWORK_ADDRESS (identity));
-  else if (G_IS_NETWORK_SERVICE (identity))
-    hostname = g_network_service_get_domain (G_NETWORK_SERVICE (identity));
-  else if (G_IS_INET_SOCKET_ADDRESS (identity))
-    {
-      GInetAddress *addr;
-
-      addr = g_inet_socket_address_get_address (G_INET_SOCKET_ADDRESS (identity));
-      hostname = free_hostname = g_inet_address_to_string (addr);
-    }
-  if (hostname)
-    {
-      if (!gnutls_x509_crt_check_hostname (gnutls_chain->chain[0], hostname))
-        result |= G_TLS_CERTIFICATE_BAD_IDENTITY;
-      g_free (free_hostname);
-    }
+  if (identity)
+    result |= g_tls_certificate_gnutls_verify_identity (G_TLS_CERTIFICATE_GNUTLS (chain),
+                                                        identity,
+                                                        error);
 
   certificate_chain_free (gnutls_chain);
   return result;
@@ -586,129 +564,56 @@ g_tls_database_gnutls_populate_trust_list (GTlsDatabaseGnutls        *self,
   return gerr >= 0;
 }
 
-#if GNUTLS_VERSION_MAJOR > 3 || GNUTLS_VERSION_MAJOR == 3 && GNUTLS_VERSION_MINOR >= 7
-static int
-issuer_missing_cb (gnutls_x509_trust_list_t   tlist,
-                   const gnutls_x509_crt_t    crt,
-                   gnutls_x509_crt_t        **issuers,
-                   guint                     *issuers_size)
+static gnutls_x509_trust_list_t
+create_trust_list (GTlsDatabaseGnutls  *self,
+                   GError             **error)
 {
-  GTlsDatabaseGnutls *self = gnutls_x509_trust_list_get_ptr (tlist);
-  GTlsDatabaseGnutlsPrivate *priv = g_tls_database_gnutls_get_instance_private (self);
-  gnutls_datum_t datum;
-  GInputStream *istream = NULL;
-  char *aia = NULL;
-  char *scheme = NULL;
-  int gerr;
-  int ret = -1;
-  guchar buffer[2048];
-  gssize n_read;
-  GByteArray *der = NULL;
-  GError *error = NULL;
+  GTlsDatabaseGnutlsClass *database_class = G_TLS_DATABASE_GNUTLS_GET_CLASS (self);
+  gnutls_x509_trust_list_t trust_list;
+  int ret;
 
-  /* The server sent an incomplete certificate chain, but we may be able to
-   * download the missing certificate to allow verification to proceed. See
-   * Authority Information Access, RFC 5280 §4.2.2.1. Also see:
-   * https://blogs.gnome.org/mcatanzaro/2015/01/30/mozilla-is-responsible-for-the-redhat-corpmerchandise-com-fiasco/
-   */
-
-  /* Note: priv->mutex is already locked by g_tls_database_gnutls_verify_chain(). */
-
-  for (int i = 0; ; i++)
+  ret = gnutls_x509_trust_list_init (&trust_list, 0);
+  if (ret != 0)
     {
-      gerr = gnutls_x509_crt_get_authority_info_access (crt, i, GNUTLS_IA_CAISSUERS_URI, &datum, NULL);
-      if (gerr == GNUTLS_E_UNKNOWN_ALGORITHM)
-        continue;
-
-      if (gerr == GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE)
-        return -1;
-
-      if (gerr < 0)
-        {
-          g_warning ("Failed to read Authority Information Access from certificate: %s", gnutls_strerror (gerr));
-          return -1;
-        }
-
-      /* Success */
-      break;
-    }
-  g_assert (gerr == GNUTLS_E_SUCCESS);
-
-  aia = g_malloc0 (datum.size + 1);
-  memcpy (aia, datum.data, datum.size);
-
-  if (!g_uri_is_valid (aia, G_URI_FLAGS_NONE, &error))
-    {
-      g_warning ("Authority Information Access URI %s is not a valid URI: %s", aia, error->message);
-      goto out;
+      g_set_error (error, G_TLS_ERROR, G_TLS_ERROR_MISC, "Failed to initialize trust list: %s", gnutls_strerror (ret));
+      return NULL;
     }
 
-  /* We support only HTTP. Notably, HTTPS is not supported because (a) it is
-   * not specified by RFC 5280, and (b) since we have no way to break a
-   * recursive loop if the connection to retrieve the certificate itself also
-   * requires a missing certificate. We could easily support FTP, but we don't,
-   * because that's silly. Also note that we don't support "certs-only" CMS
-   * messages, we only support directly retrieving a DER certificate. Finally,
-   * we don't support the case where accessLocation is a directoryName, so no
-   * private DAP or LDAP.
-   */
-  scheme = g_uri_parse_scheme (aia);
-  if (!scheme || strcmp (scheme, "http") != 0)
+  g_assert (database_class->populate_trust_list);
+  if (!database_class->populate_trust_list (self, trust_list, error))
     {
-      g_warning ("Authority Information Access URI %s uses unsupported URI scheme '%s'", scheme, aia);
-      goto out;
+      gnutls_x509_trust_list_deinit (trust_list, TRUE);
+      return NULL;
     }
 
-  istream = g_tls_request_uri (aia, priv->verify_chain_cancellable, &error);
-  if (!istream)
-    {
-      g_warning ("Failed to download missing issuer certificate from Authority Information Access URI %s: %s",
-                 aia, error->message);
-      goto out;
-    }
-
-  der = g_byte_array_sized_new (sizeof (buffer));
-  do
-    {
-      n_read = g_input_stream_read (istream, buffer, sizeof (buffer),
-                                    priv->verify_chain_cancellable, &error);
-      if (n_read == -1)
-        {
-          g_warning ("Failed to download missing issuer certificate from Authority Information Access URI %s: failed g_input_stream_read: %s",
-                     aia, error->message);
-          goto out;
-        }
-      g_byte_array_append (der, buffer, n_read);
-    } while (n_read > 0);
-
-  gnutls_free (datum.data);
-  datum.size = der->len;
-  datum.data = (unsigned char *)g_byte_array_free (der, FALSE);
-  der = NULL;
-
-  gerr = gnutls_x509_crt_list_import2 (issuers, issuers_size, &datum, GNUTLS_X509_FMT_DER, 0);
-  if (gerr < 0)
-    {
-      g_warning ("Failed to download missing issuer certificate from Authority Information Access URI %s: failed gnutls_x509_crt_import: %s",
-                 aia, gnutls_strerror (gerr));
-      goto out;
-    }
-
-  ret = 0;
-
-out:
-  if (error)
-    g_error_free (error);
-  if (istream)
-    g_object_unref (istream);
-  if (der)
-    g_byte_array_unref (der);
-  gnutls_free (datum.data);
-  g_free (scheme);
-  g_free (aia);
-  return ret;
+  return trust_list;
 }
-#endif
+
+gnutls_certificate_credentials_t
+g_tls_database_gnutls_get_credentials (GTlsDatabaseGnutls  *self,
+                                       GError             **error)
+{
+  gnutls_certificate_credentials_t credentials;
+  gnutls_x509_trust_list_t trust_list = NULL;
+  int ret;
+
+  ret = gnutls_certificate_allocate_credentials (&credentials);
+  if (ret != 0)
+    {
+      g_set_error (error, G_TLS_ERROR, G_TLS_ERROR_MISC, "Failed to allocate credentials: %s", gnutls_strerror (ret));
+      return NULL;
+    }
+
+  trust_list = create_trust_list (self, error);
+  if (!trust_list)
+    {
+      gnutls_certificate_free_credentials (credentials);
+      return NULL;
+    }
+
+  gnutls_certificate_set_trust_list (credentials, trust_list, 0);
+  return credentials;
+}
 
 static void
 g_tls_database_gnutls_class_init (GTlsDatabaseGnutlsClass *klass)
@@ -744,18 +649,9 @@ g_tls_database_gnutls_initable_init (GInitable     *initable,
   if (g_cancellable_set_error_if_cancelled (cancellable, error))
     return FALSE;
 
-  gnutls_x509_trust_list_init (&trust_list, 0);
-#if GNUTLS_VERSION_MAJOR > 3 || GNUTLS_VERSION_MAJOR == 3 && GNUTLS_VERSION_MINOR >= 7
-  gnutls_x509_trust_list_set_getissuer_function (trust_list, issuer_missing_cb);
-  gnutls_x509_trust_list_set_ptr (trust_list, self);
-#endif
-
-  g_assert (G_TLS_DATABASE_GNUTLS_GET_CLASS (self)->populate_trust_list);
-  if (!G_TLS_DATABASE_GNUTLS_GET_CLASS (self)->populate_trust_list (self, trust_list, error))
-    {
-      result = FALSE;
-      goto out;
-    }
+  trust_list = create_trust_list (self, error);
+  if (!trust_list)
+    return FALSE;
 
   subjects = bytes_multi_table_new ();
   issuers = bytes_multi_table_new ();
@@ -795,7 +691,6 @@ g_tls_database_gnutls_initable_init (GInitable     *initable,
       g_mutex_unlock (&priv->mutex);
     }
 
-out:
   if (trust_list)
     gnutls_x509_trust_list_deinit (trust_list, 1);
   if (subjects)

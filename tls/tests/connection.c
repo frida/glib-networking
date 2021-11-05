@@ -2562,6 +2562,8 @@ test_connection_binding_match_tls_unique (TestConnection *test,
   GIOStream *connection;
   GByteArray *client_cb, *server_cb;
   gchar *client_b64, *server_b64;
+  gboolean client_supports_tls_unique;
+  gboolean server_supports_tls_unique;
   GError *error = NULL;
 
   test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
@@ -2590,38 +2592,39 @@ test_connection_binding_match_tls_unique (TestConnection *test,
   read_test_data_async (test);
   g_main_loop_run (test->loop);
 
-  /* Smoke test: ensure both sides support tls-unique */
-  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
-                                                  G_TLS_CHANNEL_BINDING_TLS_UNIQUE, NULL, NULL));
-  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
-                                                  G_TLS_CHANNEL_BINDING_TLS_UNIQUE, NULL, NULL));
+  /* tls-unique is supported by the OpenSSL backend always. It's supported by
+   * the GnuTLS backend only with TLS 1.2 or older. Since the test needs to be
+   * independent of backend and TLS version, this is allowed to fail....
+   */
+  client_supports_tls_unique = g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
+                                                                          G_TLS_CHANNEL_BINDING_TLS_UNIQUE, NULL, NULL);
+  server_supports_tls_unique = g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
+                                                                          G_TLS_CHANNEL_BINDING_TLS_UNIQUE, NULL, NULL);
+  g_assert_cmpint (client_supports_tls_unique, ==, server_supports_tls_unique);
 
   /* Real test: retrieve bindings and compare */
-  client_cb = g_byte_array_new ();
-  server_cb = g_byte_array_new ();
-  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
-                                                  G_TLS_CHANNEL_BINDING_TLS_UNIQUE, client_cb, NULL));
-  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
-                                                  G_TLS_CHANNEL_BINDING_TLS_UNIQUE, server_cb, NULL));
+  if (client_supports_tls_unique)
+    {
+      client_cb = g_byte_array_new ();
+      server_cb = g_byte_array_new ();
+      g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
+                                                                G_TLS_CHANNEL_BINDING_TLS_UNIQUE, client_cb, NULL));
+      g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
+                                                                G_TLS_CHANNEL_BINDING_TLS_UNIQUE, server_cb, NULL));
+      g_assert_cmpint (client_cb->len, >, 0);
+      g_assert_cmpint (server_cb->len, >, 0);
 
-#ifdef BACKEND_IS_OPENSSL
-  g_assert_cmpint (client_cb->len, >, 0);
-  g_assert_cmpint (server_cb->len, >, 0);
-#else
-  /* GnuTLS returns empty binding for TLS1.3, let's pretend it didn't happen
-   * see https://gitlab.com/gnutls/gnutls/-/issues/1041 */
-  if (client_cb->len == 0 && server_cb->len == 0)
-    g_test_skip ("GnuTLS missing support for tls-unique over TLS1.3");
-#endif
+      client_b64 = g_base64_encode (client_cb->data, client_cb->len);
+      server_b64 = g_base64_encode (server_cb->data, server_cb->len);
+      g_assert_cmpstr (client_b64, ==, server_b64);
 
-  client_b64 = g_base64_encode (client_cb->data, client_cb->len);
-  server_b64 = g_base64_encode (server_cb->data, server_cb->len);
-  g_assert_cmpstr (client_b64, ==, server_b64);
-
-  g_free (client_b64);
-  g_free (server_b64);
-  g_byte_array_unref (client_cb);
-  g_byte_array_unref (server_cb);
+      g_free (client_b64);
+      g_free (server_b64);
+      g_byte_array_unref (client_cb);
+      g_byte_array_unref (server_cb);
+    }
+  else
+    g_test_skip ("tls-unique is not supported");
 
   /* drop the mic */
   close_server_connection (test);
@@ -2635,7 +2638,7 @@ test_connection_binding_match_tls_unique (TestConnection *test,
  * please make sure the string below matches the output of
  * openssl x509 -outform der -in files/server.pem | openssl sha256 -binary | base64
  **/
-#define SERVER_CERT_DIGEST_B64 "kGOeAZnSeNtf5yzBZzUhbKFpW9qsPV+lIB/4t96OV+E="
+#define SERVER_CERT_DIGEST_B64 "AX+tOuSPoSSzxau7zBGSOxAfrO/E6eLYvCv3O8MYTfE="
 static void
 test_connection_binding_match_tls_server_end_point (TestConnection *test,
                                                     gconstpointer   data)
@@ -2934,6 +2937,92 @@ test_peer_certificate_notify (TestConnection *test,
 #endif
 }
 
+static void
+test_tls_info (TestConnection *test,
+               gconstpointer   data)
+{
+  GIOStream *connection;
+  char *ciphersuite_name;
+  GError *error = NULL;
+
+  connection = start_async_server_and_connect_to_it (test, G_TLS_AUTHENTICATION_NONE);
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_object_unref (connection);
+
+  g_assert_cmpint (g_tls_connection_get_protocol_version (G_TLS_CONNECTION (test->client_connection)), ==, G_TLS_PROTOCOL_VERSION_UNKNOWN);
+  g_assert_null (g_tls_connection_get_ciphersuite_name (G_TLS_CONNECTION (test->client_connection)));
+
+  /* No validation at all in this test */
+  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
+                                                0);
+
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+  wait_until_server_finished (test);
+
+  g_assert_no_error (test->read_error);
+  g_assert_no_error (test->server_error);
+
+  g_assert_cmpint (g_tls_connection_get_protocol_version (G_TLS_CONNECTION (test->client_connection)), !=, G_TLS_PROTOCOL_VERSION_UNKNOWN);
+  ciphersuite_name = g_tls_connection_get_ciphersuite_name (G_TLS_CONNECTION (test->client_connection));
+  g_assert_nonnull (ciphersuite_name);
+  g_free (ciphersuite_name);
+}
+
+static void
+test_connection_oscp_must_staple (TestConnection *test,
+                                  gconstpointer   data)
+{
+  GSocketClient *client;
+  GIOStream *connection;
+  GError *error = NULL;
+
+#ifdef BACKEND_IS_OPENSSL
+  g_test_skip ("OCSP Must-Staple is not supported with the openssl backend");
+  return;
+#endif
+
+  test->database = g_tls_file_database_new (tls_test_file_path ("ca-ocsp.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->database);
+
+  test->server_certificate = g_tls_certificate_new_from_file (tls_test_file_path ("server-ocsp-missing-and-key.pem"), &error);
+  g_assert_no_error (error);
+  start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, WRITE_THEN_WAIT);
+
+  client = g_socket_client_new ();
+  connection = G_IO_STREAM (g_socket_client_connect (client, G_SOCKET_CONNECTABLE (test->address),
+                                                     NULL, &error));
+  g_assert_no_error (error);
+  g_object_unref (client);
+
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_unref (connection);
+
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
+                                                G_TLS_CERTIFICATE_VALIDATE_ALL);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+
+  close_server_connection (test);
+  wait_until_server_finished (test);
+
+  /* The CA certificate states it supports status_request but our server does not
+   * actually set or support that.
+   * To be secure this must error as a bad certificate. */
+  g_assert_error (test->read_error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE);
+
+  g_clear_error (&test->read_error);
+  g_clear_error (&test->server_error);
+}
+
 int
 main (int   argc,
       char *argv[])
@@ -3064,6 +3153,10 @@ main (int   argc,
               setup_connection, test_connection_binding_match_tls_server_end_point, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/binding/match-tls-exporter", TestConnection, NULL,
               setup_connection, test_connection_binding_match_tls_exporter, teardown_connection);
+  g_test_add ("/tls/" BACKEND "/connection/tls-info", TestConnection, NULL,
+              setup_connection, test_tls_info, teardown_connection);
+  g_test_add ("/tls/" BACKEND "/connection/oscp/must-staple", TestConnection, NULL,
+              setup_connection, test_connection_oscp_must_staple, teardown_connection);
 
   ret = g_test_run ();
 

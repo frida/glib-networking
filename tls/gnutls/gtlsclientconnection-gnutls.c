@@ -493,16 +493,23 @@ g_tls_client_connection_gnutls_prepare_handshake (GTlsConnectionBase  *tls,
 }
 
 static void
-g_tls_client_connection_gnutls_complete_handshake (GTlsConnectionBase  *tls,
-                                                   gboolean             handshake_succeeded,
-                                                   gchar              **negotiated_protocol,
-                                                   GError             **error)
+g_tls_client_connection_gnutls_complete_handshake (GTlsConnectionBase   *tls,
+                                                   gboolean              handshake_succeeded,
+                                                   gchar               **negotiated_protocol,
+                                                   GTlsProtocolVersion  *protocol_version,
+                                                   gchar               **ciphersuite_name,
+                                                   GError              **error)
 {
   GTlsClientConnectionGnutls *gnutls = G_TLS_CLIENT_CONNECTION_GNUTLS (tls);
   gnutls_session_t session;
   gnutls_protocol_t version;
 
-  G_TLS_CONNECTION_BASE_CLASS (g_tls_client_connection_gnutls_parent_class)->complete_handshake (tls, handshake_succeeded, negotiated_protocol, error);
+  G_TLS_CONNECTION_BASE_CLASS (g_tls_client_connection_gnutls_parent_class)->complete_handshake (tls,
+                                                                                                 handshake_succeeded,
+                                                                                                 negotiated_protocol,
+                                                                                                 protocol_version,
+                                                                                                 ciphersuite_name,
+                                                                                                 error);
 
   /* It may have changed during the handshake, but we have to wait until here
    * because we can't emit notifies on the handshake thread.
@@ -567,10 +574,18 @@ g_tls_client_connection_gnutls_copy_session_state (GTlsClientConnection *conn,
 }
 
 static void
+g_tls_client_connection_gnutls_update_credentials (GTlsConnectionGnutls             *gnutls,
+                                                   gnutls_certificate_credentials_t  credentials)
+{
+  gnutls_certificate_set_retrieve_function2 (credentials, g_tls_client_connection_gnutls_handshake_thread_retrieve_function);
+}
+
+static void
 g_tls_client_connection_gnutls_class_init (GTlsClientConnectionGnutlsClass *klass)
 {
   GObjectClass *gobject_class = G_OBJECT_CLASS (klass);
   GTlsConnectionBaseClass *base_class = G_TLS_CONNECTION_BASE_CLASS (klass);
+  GTlsConnectionGnutlsClass *gnutls_class = G_TLS_CONNECTION_GNUTLS_CLASS (klass);
 
   gobject_class->get_property = g_tls_client_connection_gnutls_get_property;
   gobject_class->set_property = g_tls_client_connection_gnutls_set_property;
@@ -578,6 +593,8 @@ g_tls_client_connection_gnutls_class_init (GTlsClientConnectionGnutlsClass *klas
 
   base_class->prepare_handshake  = g_tls_client_connection_gnutls_prepare_handshake;
   base_class->complete_handshake = g_tls_client_connection_gnutls_complete_handshake;
+
+  gnutls_class->update_credentials = g_tls_client_connection_gnutls_update_credentials;
 
   g_object_class_override_property (gobject_class, PROP_VALIDATION_FLAGS, "validation-flags");
   g_object_class_override_property (gobject_class, PROP_SERVER_IDENTITY, "server-identity");

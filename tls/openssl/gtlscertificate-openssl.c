@@ -29,7 +29,6 @@
 #include "openssl-include.h"
 
 #include "gtlscertificate-openssl.h"
-#include "openssl-util.h"
 #include <glib/gi18n-lib.h>
 
 struct _GTlsCertificateOpenssl
@@ -60,6 +59,8 @@ enum
   PROP_NOT_VALID_AFTER,
   PROP_SUBJECT_NAME,
   PROP_ISSUER_NAME,
+  PROP_DNS_NAMES,
+  PROP_IP_ADDRESSES,
 };
 
 static void     g_tls_certificate_openssl_initable_iface_init (GInitableIface  *iface);
@@ -85,6 +86,125 @@ g_tls_certificate_openssl_finalize (GObject *object)
   G_OBJECT_CLASS (g_tls_certificate_openssl_parent_class)->finalize (object);
 }
 
+static GPtrArray *
+get_subject_alt_names (GTlsCertificateOpenssl *cert,
+                       guint                   type)
+{
+  GPtrArray *data = NULL;
+  STACK_OF (GENERAL_NAME) *sans;
+  const guint8 *san = NULL;
+  size_t san_size;
+  guint alt_occurrences;
+  guint i;
+
+  if (type == GEN_IPADD)
+    data = g_ptr_array_new_with_free_func (g_object_unref);
+  else
+    data = g_ptr_array_new_with_free_func ((GDestroyNotify)g_bytes_unref);
+
+  sans = X509_get_ext_d2i (cert->cert, NID_subject_alt_name, NULL, NULL);
+  if (sans)
+    {
+      alt_occurrences = sk_GENERAL_NAME_num (sans);
+      for (i = 0; i < alt_occurrences; i++)
+        {
+          const GENERAL_NAME *value = sk_GENERAL_NAME_value (sans, i);
+          if (value->type != type)
+            continue;
+
+          if (type == GEN_IPADD)
+            {
+              g_assert (value->type == GEN_IPADD);
+              san = ASN1_STRING_get0_data (value->d.ip);
+              san_size = ASN1_STRING_length (value->d.ip);
+              if (san_size == 4)
+                g_ptr_array_add (data, g_inet_address_new_from_bytes (san, G_SOCKET_FAMILY_IPV4));
+              else if (san_size == 16)
+                g_ptr_array_add (data, g_inet_address_new_from_bytes (san, G_SOCKET_FAMILY_IPV6));
+            }
+          else
+            {
+              g_assert (value->type == GEN_DNS);
+              san = ASN1_STRING_get0_data (value->d.ia5);
+              san_size = ASN1_STRING_length (value->d.ia5);
+              g_ptr_array_add (data, g_bytes_new (san, san_size));
+            }
+          }
+
+      for (i = 0; i < alt_occurrences; i++)
+        GENERAL_NAME_free (sk_GENERAL_NAME_value (sans, i));
+      sk_GENERAL_NAME_free (sans);
+    }
+
+  return data;
+}
+
+static void
+export_privkey_to_der (GTlsCertificateOpenssl  *openssl,
+                       guint8                 **output_data,
+                       long                    *output_size)
+{
+  PKCS8_PRIV_KEY_INFO *pkcs8;
+  BIO *bio = NULL;
+  const guint8 *data;
+
+  if (!openssl->key)
+    goto err;
+
+  pkcs8 = EVP_PKEY2PKCS8 (openssl->key);
+  if (!pkcs8)
+    goto err;
+
+  bio = BIO_new (BIO_s_mem ());
+  if (i2d_PKCS8_PRIV_KEY_INFO_bio (bio, pkcs8) == 0)
+    goto err;
+
+  *output_size = BIO_get_mem_data (bio, (char **)&data);
+  if (*output_size <= 0)
+    goto err;
+
+  *output_data = g_malloc (*output_size);
+  memcpy (*output_data, data, *output_size);
+  goto out;
+
+err:
+  *output_data = NULL;
+  *output_size = 0;
+out:
+  if (bio)
+    BIO_free_all (bio);
+  if (pkcs8)
+    PKCS8_PRIV_KEY_INFO_free (pkcs8);
+}
+
+static char *
+export_privkey_to_pem (GTlsCertificateOpenssl *openssl)
+{
+  int ret;
+  BIO *bio = NULL;
+  const char *data = NULL;
+  char *result = NULL;
+
+  if (!openssl->key)
+    return NULL;
+
+  bio = BIO_new (BIO_s_mem ());
+  ret = PEM_write_bio_PKCS8PrivateKey (bio, openssl->key, NULL, NULL, 0, NULL, NULL);
+  if (ret == 0)
+    goto out;
+
+  ret = BIO_write (bio, "\0", 1);
+  if (ret != 1)
+    goto out;
+
+  BIO_get_mem_data (bio, (char **)&data);
+  result = g_strdup (data);
+
+out:
+  BIO_free_all (bio);
+  return result;
+}
+
 static void
 g_tls_certificate_openssl_get_property (GObject    *object,
                                         guint       prop_id,
@@ -95,8 +215,9 @@ g_tls_certificate_openssl_get_property (GObject    *object,
   GByteArray *certificate;
   guint8 *data;
   BIO *bio;
+  GByteArray *byte_array;
   char *certificate_pem;
-  int size;
+  long size;
 
   const ASN1_TIME *time_asn1;
   struct tm time_tm;
@@ -141,6 +262,19 @@ g_tls_certificate_openssl_get_property (GObject    *object,
         }
       break;
 
+    case PROP_PRIVATE_KEY:
+      export_privkey_to_der (openssl, &data, &size);
+      if (size > 0 && (gint64)size <= G_MAXUINT)
+        {
+          byte_array = g_byte_array_new_take (data, size);
+          g_value_take_boxed (value, byte_array);
+        }
+      break;
+
+    case PROP_PRIVATE_KEY_PEM:
+      g_value_take_string (value, export_privkey_to_pem (openssl));
+      break;
+
     case PROP_ISSUER:
       g_value_set_object (value, openssl->issuer);
       break;
@@ -167,6 +301,7 @@ g_tls_certificate_openssl_get_property (GObject    *object,
       bio = BIO_new (BIO_s_mem ());
       name = X509_get_subject_name (openssl->cert);
       X509_NAME_print_ex (bio, name, 0, XN_FLAG_SEP_COMMA_PLUS);
+      BIO_write (bio, "\0", 1);
       BIO_get_mem_data (bio, (char **)&name_string);
       g_value_set_string (value, name_string);
       BIO_free_all (bio);
@@ -176,9 +311,18 @@ g_tls_certificate_openssl_get_property (GObject    *object,
       bio = BIO_new (BIO_s_mem ());
       name = X509_get_issuer_name (openssl->cert);
       X509_NAME_print_ex (bio, name, 0, XN_FLAG_SEP_COMMA_PLUS);
+      BIO_write (bio, "\0", 1);
       BIO_get_mem_data (bio, &name_string);
       g_value_set_string (value, name_string);
       BIO_free_all (bio);
+      break;
+
+    case PROP_DNS_NAMES:
+      g_value_take_boxed (value, get_subject_alt_names (openssl, GEN_DNS));
+      break;
+
+    case PROP_IP_ADDRESSES:
+      g_value_take_boxed (value, get_subject_alt_names (openssl, GEN_IPADD));
       break;
 
     default:
@@ -410,6 +554,8 @@ g_tls_certificate_openssl_class_init (GTlsCertificateOpensslClass *klass)
   g_object_class_override_property (gobject_class, PROP_NOT_VALID_AFTER, "not-valid-after");
   g_object_class_override_property (gobject_class, PROP_SUBJECT_NAME, "subject-name");
   g_object_class_override_property (gobject_class, PROP_ISSUER_NAME, "issuer-name");
+  g_object_class_override_property (gobject_class, PROP_DNS_NAMES, "dns-names");
+  g_object_class_override_property (gobject_class, PROP_IP_ADDRESSES, "ip-addresses");
 }
 
 static void
@@ -516,7 +662,7 @@ verify_identity_hostname (GTlsCertificateOpenssl *openssl,
   else
     return FALSE;
 
-  return g_tls_X509_check_host (openssl->cert, hostname, strlen (hostname), 0, NULL) == 1;
+  return X509_check_host (openssl->cert, hostname, strlen (hostname), 0, NULL) == 1;
 }
 
 static gboolean
@@ -548,7 +694,7 @@ verify_identity_ip (GTlsCertificateOpenssl *openssl,
   addr_bytes = g_inet_address_to_bytes (addr);
   addr_size = g_inet_address_get_native_size (addr);
 
-  ret = g_tls_X509_check_ip (openssl->cert, addr_bytes, addr_size, 0) == 1;
+  ret = X509_check_ip (openssl->cert, addr_bytes, addr_size, 0) == 1;
 
   g_object_unref (addr);
   return ret;

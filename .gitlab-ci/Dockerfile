@@ -1,9 +1,10 @@
-FROM fedora:33
+FROM fedora:latest
 
 RUN dnf update -y \
     && dnf install -y 'dnf-command(builddep)' \
     && dnf builddep -y glib-networking glib2 \
     && dnf install -y clang-analyzer \
+                      lcov \
                       libasan \
                       openssl-devel \
                       git \
