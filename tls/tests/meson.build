@@ -71,7 +71,7 @@ foreach backend: backends
       '-D_GNU_SOURCE',
     ]
 
-    if not ['windows'].contains(host_system)
+    if not ['windows', 'qnx'].contains(host_system)
       program_deps += cc.find_library('dl')
     endif
 
