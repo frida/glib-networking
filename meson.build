@@ -33,7 +33,9 @@ common_flags = [
 ]
 
 # old versions of glibc require this for resolv.h, which gets included by gio/gnetworking.h
-common_flags += '-D_GNU_SOURCE'
+if host_system == 'linux'
+  common_flags += '-D_GNU_SOURCE'
+endif
 
 ndebug = get_option('b_ndebug')
 if ndebug == 'true' or (ndebug == 'if-release' and not get_option('debug'))
