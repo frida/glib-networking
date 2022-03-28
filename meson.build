@@ -38,6 +38,11 @@ if host_system == 'linux'
   common_flags += '-D_GNU_SOURCE'
 endif
 
+# ...and same story for QNX
+if host_system == 'qnx'
+  common_flags += '-D_QNX_SOURCE'
+endif
+
 ndebug = get_option('b_ndebug')
 if ndebug == 'true' or (ndebug == 'if-release' and not get_option('debug'))
   common_flags += [
