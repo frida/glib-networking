@@ -1,9 +1,9 @@
 project(
   'glib-networking', 'c',
-  version: '2.70.0',
+  version: '2.74.0',
   license: 'LGPL2.1+',
-  meson_version: '>= 0.50.0',
-  default_options: ['c_std=c99']
+  meson_version: '>= 0.60.0',
+  default_options: ['c_std=gnu99']
 )
 
 prefix = get_option('prefix')
@@ -21,6 +21,7 @@ host_system = host_machine.system()
 config_h = configuration_data()
 
 config_h.set_quoted('GETTEXT_PACKAGE', meson.project_name())
+config_h.set10('ENABLE_DEBUG_LOGS', get_option('debug_logs'))
 
 # compiler flags
 common_flags = [
@@ -32,23 +33,13 @@ common_flags = [
   '-DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_70'
 ]
 
-# old versions of glibc require this for resolv.h, which gets included by gio/gnetworking.h
-if host_system == 'linux'
-  common_flags += '-D_GNU_SOURCE'
+build_static = get_option('static_modules') or get_option('default_library') != 'shared'
+build_shared = get_option('default_library') != 'static'
+if build_static and build_shared and (host_system == 'windows' or host_system == 'cygwin')
+  error('On Windows default_library must be "shared" or "static" but not "both"')
 endif
-
-# ...and same story for QNX
-if host_system == 'qnx'
-  common_flags += '-D_QNX_SOURCE'
-endif
-
-ndebug = get_option('b_ndebug')
-if ndebug == 'true' or (ndebug == 'if-release' and not get_option('debug'))
-  common_flags += [
-    '-DG_DISABLE_CAST_CHECKS',
-    '-DG_DISABLE_ASSERT',
-    '-DG_DISABLE_CHECKS'
-  ]
+if build_static and not build_shared
+  common_flags += '-DGLIB_NETWORKING_STATIC_COMPILATION'
 endif
 
 add_project_arguments(common_flags, language: 'c')
@@ -67,7 +58,7 @@ if host_system.contains('linux') or host_system == 'android'
 endif
 
 # *** Check GLib GIO        ***
-glib_dep = dependency('glib-2.0', version: '>= 2.69.0',
+glib_dep = dependency('glib-2.0', version: '>= 2.73.3',
   fallback: ['glib', 'libglib_dep'])
 gio_dep = dependency('gio-2.0',
   fallback: ['glib', 'libgio_dep'])
@@ -76,27 +67,18 @@ gobject_dep = dependency('gobject-2.0',
 gmodule_dep = dependency('gmodule-2.0',
   fallback: ['glib', 'libgmodule_dep'])
 
-gio_supports_plugins = cc.compiles('''
-#include <glib.h>
-#ifdef GIO_STATIC_COMPILATION
-# error GIO does not support plugins
-#endif
-  ''',
-  name: 'GIO supports plugins',
-  dependencies: [gio_dep])
-
 if glib_dep.type_name() == 'internal'
   glib_proj = subproject('glib')
   gio_module_dir = glib_proj.get_variable('glib_giomodulesdir')
 else
-  gio_module_dir = gio_dep.get_pkgconfig_variable('giomoduledir',
-                                                  define_variable: ['libdir', join_paths(prefix, libdir)])
+  gio_module_dir = gio_dep.get_variable('giomoduledir',
+                                         pkgconfig_define: ['libdir', join_paths(prefix, libdir)])
 endif
 
 assert(gio_module_dir != '', 'GIO_MODULE_DIR is missing from gio-2.0.pc')
 
 # *** Checks for LibProxy   ***
-libproxy_dep = dependency('libproxy-1.0', version: '>= 0.3.1', required: get_option('libproxy'))
+libproxy_dep = dependency('libproxy-1.0', version: '>= 0.4.16', required: get_option('libproxy'))
 
 # *** Checks for GNOME      ***
 gsettings_desktop_schemas_dep = dependency('gsettings-desktop-schemas', required: get_option('gnome_proxy'))
@@ -108,7 +90,7 @@ have_rtld_noload = cc.has_header_symbol('dlfcn.h', 'RTLD_NOLOAD')
 config_h.set('HAVE_RTLD_NOLOAD', have_rtld_noload)
 
 # *** Checks for GnuTLS     ***
-gnutls_dep = dependency('gnutls', version: '>= 3.6.5', required: get_option('gnutls'))
+gnutls_dep = dependency('gnutls', version: '>= 3.7.4', required: get_option('gnutls'))
 
 if gnutls_dep.found()
   backends += ['gnutls']
@@ -119,51 +101,18 @@ openssl_option = get_option('openssl')
 if openssl_option.disabled()
   openssl_dep = []
 else
-  # XXX: https://github.com/mesonbuild/meson/issues/2945
-  openssl_dep = dependency('openssl', version: '>= 1.0.2', required: false)
+  # We want to use CMake to help us find OpenSSL on Visual
+  # Studio-like builds, and we should check that the libssl.lib
+  # (or ssleay32.lib) is indeed there by using
+  # modules: [ 'OpenSSL::SSL' ]
+  openssl_modules = cc.get_argument_syntax() == 'msvc' ? \
+                    [ 'OpenSSL::SSL' ] : []
+  openssl_dep = dependency('openssl',
+                           version: '>= 1.0.2',
+                           modules: openssl_modules,
+                           required: openssl_option)
   if openssl_dep.found()
     backends += ['openssl']
-  else
-    # MSVC builds of OpenSSL does not generate pkg-config files,
-    # so we check for it manually here in this case, if we can't find those files
-    # Based on the CMake check for OpenSSL in CURL's CMakeLists.txt,
-    # on which headers we should check for
-
-    # OpenSSL's MSVC NMake Makefiles prepends the library filenames with 'lib',
-    # so we must prepend the libraries with 'lib' on MSVC, except for the pre-1.1.x
-    # ssleay32.lib
-    openssl_lib_prefix = ''
-    if cc.get_argument_syntax() == 'msvc'
-      openssl_lib_prefix = 'lib'
-    endif
-
-    openssl_headers = []
-    foreach h : ['crypto.h', 'engine.h', 'err.h', 'pem.h',
-                 'rsa.h', 'ssl.h', 'x509.h', 'rand.h', 'tls1.h']
-      openssl_headers += 'openssl/' + h
-    endforeach
-
-    # OpenSSL 1.1.x and 1.0.x (or earlier) have different .lib names,
-    # so we need to look for the correct pair
-
-    # Find either libcrypto.lib (1.1.x) or libeay32.lib (1.0.x or earlier) first
-    libcrypto_dep = cc.find_library('@0@crypto'.format(openssl_lib_prefix), required: false)
-    if libcrypto_dep.found()
-      libssl = '@0@ssl'.format(openssl_lib_prefix)
-    else
-      libcrypto_dep = cc.find_library('@0@eay32'.format(openssl_lib_prefix), required: openssl_option)
-      libssl = 'ssleay32'
-    endif
-
-    if libcrypto_dep.found()
-      # Find the corresponding SSL library depending on which crypto .lib we found
-      libssl_dep = cc.find_library(libssl, required: openssl_option, has_headers: openssl_headers)
-    endif
-
-    if libcrypto_dep.found() and libssl_dep.found()
-      openssl_dep = [libcrypto_dep, libssl_dep]
-      backends += ['openssl']
-    endif
   endif
 endif
 
@@ -180,12 +129,8 @@ gnome = import('gnome')
 i18n = import('i18n')
 pkg = import('pkgconfig')
 
-po_dir = join_paths(meson.source_root(), 'po')
-
 top_inc = include_directories('.')
 tls_inc = include_directories('tls')
-
-subdir('po')
 
 enable_installed_tests = get_option('installed_tests')
 test_template = files('template.test.in')
@@ -197,43 +142,23 @@ if ['darwin', 'ios'].contains(host_system)
   module_suffix = 'so'
 endif
 
-if libproxy_dep.found() or gsettings_desktop_schemas_dep.found()
-  proxy_test_programs = []
+proxy_test_programs = []
 
-  if libproxy_dep.found()
-    subdir('proxy/libproxy')
-  endif
+# When glib-networking is a subproject this variable is used by parent project
+# to know which modules have been built.
+giomodules = []
 
-  if gsettings_desktop_schemas_dep.found()
-    subdir('proxy/gnome')
-  endif
+subdir('po')
+subdir('proxy')
+subdir('tls')
 
-  subdir('proxy/tests')
-endif
+# Will automatically pick it up from the cross file if defined
+gnome.post_install(gio_querymodules: gio_module_dir)
 
-subdir('tls/base')
-
-if gnutls_dep.found()
-  subdir('tls/gnutls')
-endif
-
-if backends.contains('openssl')
-  subdir('tls/openssl')
-endif
-
-subdir('tls/tests')
-
-if gio_supports_plugins
-  # Will automatically pick it up from the cross file if defined
-  gio_querymodules = find_program('gio-querymodules', required : false)
-  if gio_querymodules.found()
-    meson.add_install_script('meson_post_install.py', gio_querymodules.path(), gio_module_dir)
-  endif
-endif
-
-output = '\n\n'
-output += '  gnutls support:      ' + backends.contains('gnutls').to_string() + '\n'
-output += '  openssl support:     ' + backends.contains('openssl').to_string() + '\n'
-output += '  libproxy support:    ' + libproxy_dep.found().to_string() + '\n'
-output += '  GNOME proxy support: ' + gsettings_desktop_schemas_dep.found().to_string() + '\n'
-message(output)
+summary({
+  'GnuTLS support': giomodules.contains('giognutls'),
+  'OpenSSL support': giomodules.contains('gioopenssl'),
+  'Environment proxy support': giomodules.contains('gioenvironmentproxy'),
+  'libproxy support': giomodules.contains('giolibproxy'),
+  'GNOME proxy support': giomodules.contains('giognomeproxy'),
+}, bool_yn: true)

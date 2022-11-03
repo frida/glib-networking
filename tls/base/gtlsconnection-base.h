@@ -216,4 +216,11 @@ void                      g_tls_connection_base_handshake_thread_buffer_applicat
                                                                          guint8             *data,
                                                                          gsize               length);
 
+gchar                    *g_tls_connection_base_get_session_id          (GTlsConnectionBase  *tls);
+
+gboolean                  g_tls_connection_base_get_session_resumption  (GTlsConnectionBase  *tls);
+
+void                      g_tls_connection_base_set_session_resumption  (GTlsConnectionBase *tls,
+                                                                         gboolean session_resumption_enabled);
+
 G_END_DECLS

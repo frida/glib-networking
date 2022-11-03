@@ -40,6 +40,12 @@
 #include "openssl-include.h"
 #endif
 
+#if defined(G_OS_UNIX)
+#include <dlfcn.h>
+static struct timespec offset;
+static struct timespec session_time_offset;
+#endif
+
 static const gchar *
 tls_test_file_path (const char *name)
 {
@@ -104,6 +110,20 @@ setup_connection (TestConnection *test, gconstpointer data)
   test->context = g_main_context_default ();
   test->loop = g_main_loop_new (test->context, FALSE);
   test->auth_mode = G_TLS_AUTHENTICATION_NONE;
+#if defined(G_OS_UNIX)
+  offset.tv_sec = 0;
+  offset.tv_nsec = 0;
+#endif
+}
+
+static void
+setup_session_connection (TestConnection *test, gconstpointer data)
+{
+  setup_connection (test, data);
+#if defined(G_OS_UNIX)
+  offset.tv_sec += 11 * 60 + session_time_offset.tv_sec;
+  session_time_offset.tv_sec += 11 * 60;
+#endif
 }
 
 /* Waits about 10 seconds for @var to be NULL/FALSE */
@@ -145,6 +165,11 @@ wait_until_server_finished (TestConnection *test)
 static void
 teardown_connection (TestConnection *test, gconstpointer data)
 {
+#if defined(G_OS_UNIX)
+  offset.tv_sec = 0;
+  offset.tv_nsec = 0;
+#endif
+
   if (test->service)
     {
       g_socket_service_stop (test->service);
@@ -550,6 +575,246 @@ read_test_data_async (TestConnection *test)
   g_data_input_stream_read_line_async (stream, G_PRIORITY_DEFAULT, NULL,
                                        on_input_read_finish, test);
   g_object_unref (stream);
+}
+
+#if defined(G_OS_UNIX)
+typedef int (*clock_gettime_fnptr)(clockid_t clk_id, struct timespec *tp);
+static __thread clock_gettime_fnptr original_clock_gettime = NULL;
+
+int
+clock_gettime (clockid_t        clk_id,
+               struct timespec *tp)
+{
+  int ret = -1;
+  if (!original_clock_gettime)
+    {
+      original_clock_gettime = dlsym (RTLD_NEXT, "clock_gettime");
+      if (!original_clock_gettime)
+        {
+          errno = EINVAL;
+          return -1;
+        }
+    }
+
+  ret = original_clock_gettime (clk_id, tp);
+  if (ret == 0)
+    {
+      tp->tv_sec += offset.tv_sec;
+      tp->tv_nsec += offset.tv_nsec;
+    }
+
+  return ret;
+}
+#endif
+
+static void
+test_connection_session_resume_ten_minute_expiry (TestConnection *test,
+                                                 gconstpointer   data)
+{
+  GIOStream *connection;
+  GError *error = NULL;
+  GTlsCertificate *cert;
+  GSocketClient *client;
+  gboolean reused = FALSE;
+
+#if !defined(G_OS_UNIX)
+  g_test_skip ("test_connection_session_resume_ten_minute_expiry requires interposing clock_gettime which is only available in UNIX platforms");
+  return;
+#endif
+
+  test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->database);
+
+  connection = start_async_server_and_connect_to_it (test, G_TLS_AUTHENTICATION_REQUIRED);
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_set (test->client_connection, "session-resumption-enabled", TRUE, NULL);
+  g_object_unref (connection);
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("client-and-key.pem"), &error);
+  g_assert_no_error (error);
+  g_tls_connection_set_certificate (G_TLS_CONNECTION (test->client_connection), cert);
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  g_object_get (G_OBJECT (test->client_connection),
+		"session-reused", &reused,
+		NULL);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+  wait_until_server_finished (test);
+
+  g_assert_no_error (test->read_error);
+  g_assert_no_error (test->server_error);
+
+  g_object_unref (cert);
+  g_object_unref (test->client_connection);
+  g_clear_object (&test->server_connection);
+
+  g_assert_false (reused);
+
+#if defined(G_OS_UNIX)
+  /* Expiry should be 10 min */
+  session_time_offset.tv_sec += 11 * 60;
+  offset.tv_sec += 11 * 60;
+#endif
+
+  /* Now start a new connection to the same server */
+  client = g_socket_client_new ();
+  connection = G_IO_STREAM (g_socket_client_connect (client, G_SOCKET_CONNECTABLE (test->address),
+                                                     NULL, &error));
+  g_assert_no_error (error);
+  g_object_unref (client);
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_set (test->client_connection, "session-resumption-enabled", TRUE, NULL);
+  g_object_unref (connection);
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("client-and-key.pem"), &error);
+  g_assert_no_error (error);
+  g_tls_connection_set_certificate (G_TLS_CONNECTION (test->client_connection), cert);
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  g_object_get (G_OBJECT (test->client_connection),
+		"session-reused", &reused,
+		NULL);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+  wait_until_server_finished (test);
+
+  g_assert_no_error (test->read_error);
+  g_assert_no_error (test->server_error);
+
+  g_object_unref (cert);
+
+  /* Second connection *DID NOT* reuse the first connection */
+#if !defined(BACKEND_IS_GNUTLS)
+  // FIXME: https://gitlab.gnome.org/GNOME/glib-networking/issues/196
+  g_assert_false (reused);
+#endif
+}
+
+static void
+test_connection_session_resume_multiple_times (TestConnection *test,
+                                              gconstpointer   data)
+{
+  GIOStream *connection;
+  GError *error = NULL;
+  GTlsCertificate *cert;
+  GSocketClient *client;
+  gboolean reused = FALSE;
+
+  test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->database);
+
+  connection = start_async_server_and_connect_to_it (test, G_TLS_AUTHENTICATION_REQUIRED);
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_set (test->client_connection, "session-resumption-enabled", TRUE, NULL);
+  g_object_unref (connection);
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("client-and-key.pem"), &error);
+  g_assert_no_error (error);
+  g_tls_connection_set_certificate (G_TLS_CONNECTION (test->client_connection), cert);
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  g_object_get (G_OBJECT (test->client_connection),
+		"session-reused", &reused,
+		NULL);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+  wait_until_server_finished (test);
+
+  g_assert_no_error (test->read_error);
+  g_assert_no_error (test->server_error);
+
+  g_object_unref (cert);
+  g_object_unref (test->client_connection);
+  g_clear_object (&test->server_connection);
+
+  /* First connection was not reused */
+  g_assert_false (reused);
+
+  /* Now start a new connection to the same server */
+  client = g_socket_client_new ();
+  connection = G_IO_STREAM (g_socket_client_connect (client, G_SOCKET_CONNECTABLE (test->address),
+                                                     NULL, &error));
+  g_assert_no_error (error);
+  g_object_unref (client);
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_set (test->client_connection, "session-resumption-enabled", TRUE, NULL);
+  g_object_unref (connection);
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("client-and-key.pem"), &error);
+  g_assert_no_error (error);
+  g_tls_connection_set_certificate (G_TLS_CONNECTION (test->client_connection), cert);
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  g_object_get (G_OBJECT (test->client_connection),
+		"session-reused", &reused,
+		NULL);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+  wait_until_server_finished (test);
+
+  g_assert_no_error (test->read_error);
+  g_assert_no_error (test->server_error);
+
+  g_object_unref (cert);
+  g_object_unref (test->client_connection);
+  g_clear_object (&test->server_connection);
+
+  /* Second connection reused the first connection */
+#if !defined(BACKEND_IS_GNUTLS)
+  // FIXME: https://gitlab.gnome.org/GNOME/glib-networking/issues/196
+  g_assert_true (reused);
+#endif
+
+  /* Now start a third connection to the same server */
+  client = g_socket_client_new ();
+  connection = G_IO_STREAM (g_socket_client_connect (client, G_SOCKET_CONNECTABLE (test->address),
+                                                     NULL, &error));
+  g_assert_no_error (error);
+  g_object_unref (client);
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_set (test->client_connection, "session-resumption-enabled", TRUE, NULL);
+  g_object_unref (connection);
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path ("client-and-key.pem"), &error);
+  g_assert_no_error (error);
+  g_tls_connection_set_certificate (G_TLS_CONNECTION (test->client_connection), cert);
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  g_object_get (G_OBJECT (test->client_connection),
+		"session-reused", &reused,
+		NULL);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+  wait_until_server_finished (test);
+
+  g_assert_no_error (test->read_error);
+  g_assert_no_error (test->server_error);
+
+  g_object_unref (cert);
+
+  /* Third connection reused the first connection */
+#if !defined(BACKEND_IS_GNUTLS)
+  // FIXME: https://gitlab.gnome.org/GNOME/glib-networking/issues/196
+  g_assert_true (reused);
+#endif
 }
 
 static void
@@ -2605,6 +2870,8 @@ test_connection_binding_match_tls_unique (TestConnection *test,
   /* Real test: retrieve bindings and compare */
   if (client_supports_tls_unique)
     {
+      g_assert_false (g_tls_connection_get_protocol_version (
+            G_TLS_CONNECTION (test->client_connection)) == G_TLS_PROTOCOL_VERSION_TLS_1_3);
       client_cb = g_byte_array_new ();
       server_cb = g_byte_array_new ();
       g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
@@ -2624,7 +2891,11 @@ test_connection_binding_match_tls_unique (TestConnection *test,
       g_byte_array_unref (server_cb);
     }
   else
-    g_test_skip ("tls-unique is not supported");
+    {
+      g_assert_true (g_tls_connection_get_protocol_version (
+            G_TLS_CONNECTION (test->client_connection)) == G_TLS_PROTOCOL_VERSION_TLS_1_3);
+      g_test_skip ("tls-unique is not supported");
+    }
 
   /* drop the mic */
   close_server_connection (test);
@@ -2638,7 +2909,7 @@ test_connection_binding_match_tls_unique (TestConnection *test,
  * please make sure the string below matches the output of
  * openssl x509 -outform der -in files/server.pem | openssl sha256 -binary | base64
  **/
-#define SERVER_CERT_DIGEST_B64 "AX+tOuSPoSSzxau7zBGSOxAfrO/E6eLYvCv3O8MYTfE="
+#define SERVER_CERT_DIGEST_B64 "sdRMUK4PwcHXUPAMwglrSy4Fi8Ybfim61hfucliJ19s="
 static void
 test_connection_binding_match_tls_server_end_point (TestConnection *test,
                                                     gconstpointer   data)
@@ -2717,6 +2988,8 @@ test_connection_binding_match_tls_exporter (TestConnection *test,
   GByteArray *client_cb, *server_cb;
   gchar *client_b64, *server_b64;
   GError *error = NULL;
+  gboolean client_supports_tls_exporter;
+  gboolean server_supports_tls_exporter;
 
   test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
   g_assert_no_error (error);
@@ -2745,27 +3018,38 @@ test_connection_binding_match_tls_exporter (TestConnection *test,
   g_main_loop_run (test->loop);
 
   /* Smoke test: ensure both sides support tls-exporter */
-  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
-                                                    (GTlsChannelBindingType)100500, NULL, NULL));
-  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
-                                                    (GTlsChannelBindingType)100500, NULL, NULL));
+  client_supports_tls_exporter = g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
+                                                    G_TLS_CHANNEL_BINDING_TLS_EXPORTER, NULL, NULL);
+  server_supports_tls_exporter = g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
+                                                    G_TLS_CHANNEL_BINDING_TLS_EXPORTER, NULL, NULL);
 
-  /* Real test: retrieve bindings and compare */
-  client_cb = g_byte_array_new ();
-  server_cb = g_byte_array_new ();
-  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
-                                                    (GTlsChannelBindingType)100500, client_cb, NULL));
-  g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
-                                                    (GTlsChannelBindingType)100500, server_cb, NULL));
+  g_assert_true (client_supports_tls_exporter == server_supports_tls_exporter);
 
-  client_b64 = g_base64_encode (client_cb->data, client_cb->len);
-  server_b64 = g_base64_encode (server_cb->data, server_cb->len);
-  g_assert_cmpstr (client_b64, ==, server_b64);
+  if (client_supports_tls_exporter)
+    {
+      /* Real test: retrieve bindings and compare */
+      client_cb = g_byte_array_new ();
+      server_cb = g_byte_array_new ();
+      g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->client_connection),
+                                                        G_TLS_CHANNEL_BINDING_TLS_EXPORTER, client_cb, NULL));
+      g_assert_true (g_tls_connection_get_channel_binding_data (G_TLS_CONNECTION (test->server_connection),
+                                                        G_TLS_CHANNEL_BINDING_TLS_EXPORTER, server_cb, NULL));
 
-  g_free (client_b64);
-  g_free (server_b64);
-  g_byte_array_unref (client_cb);
-  g_byte_array_unref (server_cb);
+      client_b64 = g_base64_encode (client_cb->data, client_cb->len);
+      server_b64 = g_base64_encode (server_cb->data, server_cb->len);
+      g_assert_cmpstr (client_b64, ==, server_b64);
+
+      g_free (client_b64);
+      g_free (server_b64);
+      g_byte_array_unref (client_cb);
+      g_byte_array_unref (server_cb);
+    }
+  else
+    {
+      g_assert_true (g_tls_connection_get_protocol_version (
+            G_TLS_CONNECTION (test->client_connection)) == G_TLS_PROTOCOL_VERSION_TLS_1_2);
+      g_test_skip ("tls-exporter is not supported before TLS 1.3");
+    }
 
   /* drop the mic */
   close_server_connection (test);
@@ -2979,8 +3263,55 @@ test_connection_oscp_must_staple (TestConnection *test,
   GIOStream *connection;
   GError *error = NULL;
 
+  test->database = g_tls_file_database_new (tls_test_file_path ("ca.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->database);
+
+  test->server_certificate = g_tls_certificate_new_from_file (tls_test_file_path ("server-ocsp-required-by-server-and-key.pem"), &error);
+  g_assert_no_error (error);
+  start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, WRITE_THEN_WAIT);
+
+  client = g_socket_client_new ();
+  connection = G_IO_STREAM (g_socket_client_connect (client, G_SOCKET_CONNECTABLE (test->address),
+                                                     NULL, &error));
+  g_assert_no_error (error);
+  g_object_unref (client);
+
+  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (test->client_connection);
+  g_object_unref (connection);
+
+  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
+
+  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
+                                                G_TLS_CERTIFICATE_VALIDATE_ALL);
+
+  read_test_data_async (test);
+  g_main_loop_run (test->loop);
+
+  close_server_connection (test);
+  wait_until_server_finished (test);
+
+  /* The server certificate states it supports status_request but our server does not
+   * actually set or support that.
+   * To be secure this must error as a bad certificate. */
+  g_assert_error (test->read_error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE);
+
+  g_clear_error (&test->read_error);
+  g_clear_error (&test->server_error);
+}
+
+static void
+test_connection_oscp_must_staple_intermediate_certificate (TestConnection *test,
+                                                           gconstpointer   data)
+{
+  GSocketClient *client;
+  GIOStream *connection;
+  GError *error = NULL;
+
 #ifdef BACKEND_IS_OPENSSL
-  g_test_skip ("OCSP Must-Staple is not supported with the openssl backend");
+  g_test_skip ("OCSP Must-Staple on intermediate certificates is not supported with the OpenSSL backend");
   return;
 #endif
 
@@ -2988,7 +3319,7 @@ test_connection_oscp_must_staple (TestConnection *test,
   g_assert_no_error (error);
   g_assert_nonnull (test->database);
 
-  test->server_certificate = g_tls_certificate_new_from_file (tls_test_file_path ("server-ocsp-missing-and-key.pem"), &error);
+  test->server_certificate = g_tls_certificate_new_from_file (tls_test_file_path ("server-ocsp-required-by-ca-and-key.pem"), &error);
   g_assert_no_error (error);
   start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, WRITE_THEN_WAIT);
 
@@ -3069,6 +3400,10 @@ main (int   argc,
   g_free (module_path);
 #endif
 
+  g_test_add ("/tls/" BACKEND "/connection/session/resume_multiple_times", TestConnection, NULL,
+              setup_session_connection, test_connection_session_resume_multiple_times, teardown_connection);
+  g_test_add ("/tls/" BACKEND "/connection/session/reuse_ten_minute_expiry", TestConnection, NULL,
+              setup_session_connection, test_connection_session_resume_ten_minute_expiry, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/basic", TestConnection, NULL,
               setup_connection, test_basic_connection, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/verified", TestConnection, NULL,
@@ -3157,6 +3492,8 @@ main (int   argc,
               setup_connection, test_tls_info, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/oscp/must-staple", TestConnection, NULL,
               setup_connection, test_connection_oscp_must_staple, teardown_connection);
+  g_test_add ("/tls/" BACKEND "/connection/oscp/must-staple-intermediate-certificate", TestConnection, NULL,
+              setup_connection, test_connection_oscp_must_staple_intermediate_certificate, teardown_connection);
 
   ret = g_test_run ();
 

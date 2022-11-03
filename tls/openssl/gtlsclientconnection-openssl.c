@@ -29,10 +29,11 @@
 #include <errno.h>
 #include <string.h>
 
-#include "openssl-include.h"
 #include "gtlsconnection-base.h"
-#include "gtlsclientconnection-openssl.h"
+#include "gtlsconnection-openssl.h"
 #include "gtlsbackend-openssl.h"
+#include "gtlsclientconnection-openssl.h"
+#include "gtlssessioncache.h"
 #include "gtlscertificate-openssl.h"
 #include "gtlsdatabase-openssl.h"
 #include <glib/gi18n-lib.h>
@@ -44,6 +45,7 @@ struct _GTlsClientConnectionOpenssl
   GTlsCertificateFlags validation_flags;
   GSocketConnectable *server_identity;
   gboolean use_ssl3;
+  gboolean session_reused;
 
   STACK_OF (X509_NAME) *ca_list;
 
@@ -58,7 +60,9 @@ enum
   PROP_VALIDATION_FLAGS,
   PROP_SERVER_IDENTITY,
   PROP_USE_SSL3,
-  PROP_ACCEPTED_CAS
+  PROP_ACCEPTED_CAS,
+  PROP_SESSION_RESUMPTION_ENABLED,
+  PROP_SESSION_REUSED
 };
 
 static void g_tls_client_connection_openssl_initable_interface_init (GInitableIface  *iface);
@@ -106,6 +110,7 @@ g_tls_client_connection_openssl_get_property (GObject    *object,
                                              GValue     *value,
                                              GParamSpec *pspec)
 {
+  GTlsConnectionBase *tls = G_TLS_CONNECTION_BASE (object);
   GTlsClientConnectionOpenssl *openssl = G_TLS_CLIENT_CONNECTION_OPENSSL (object);
   GList *accepted_cas;
   gint i;
@@ -151,6 +156,14 @@ g_tls_client_connection_openssl_get_property (GObject    *object,
       g_value_set_pointer (value, accepted_cas);
       break;
 
+    case PROP_SESSION_REUSED:
+      g_value_set_boolean (value, openssl->session_reused);
+      break;
+
+    case PROP_SESSION_RESUMPTION_ENABLED:
+      g_value_set_boolean (value, g_tls_connection_base_get_session_resumption (tls));
+      break;
+
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
     }
@@ -162,6 +175,7 @@ g_tls_client_connection_openssl_set_property (GObject      *object,
                                              const GValue *value,
                                              GParamSpec   *pspec)
 {
+  GTlsConnectionBase *tls = G_TLS_CONNECTION_BASE (object);
   GTlsClientConnectionOpenssl *openssl = G_TLS_CLIENT_CONNECTION_OPENSSL (object);
 
   switch (prop_id)
@@ -178,6 +192,10 @@ g_tls_client_connection_openssl_set_property (GObject      *object,
 
     case PROP_USE_SSL3:
       openssl->use_ssl3 = g_value_get_boolean (value);
+      break;
+
+    case PROP_SESSION_RESUMPTION_ENABLED:
+      g_tls_connection_base_set_session_resumption (tls, g_value_get_boolean (value));
       break;
 
     default:
@@ -213,7 +231,6 @@ static GTlsCertificateFlags
 verify_ocsp_response (GTlsClientConnectionOpenssl *openssl,
                       GTlsCertificate             *peer_certificate)
 {
-#if (OPENSSL_VERSION_NUMBER >= 0x0090808fL) && !defined(OPENSSL_NO_TLSEXT) && !defined(OPENSSL_NO_OCSP)
   SSL *ssl = NULL;
   OCSP_RESPONSE *resp = NULL;
   GTlsDatabase *database;
@@ -222,22 +239,12 @@ verify_ocsp_response (GTlsClientConnectionOpenssl *openssl,
 
   ssl = g_tls_connection_openssl_get_ssl (G_TLS_CONNECTION_OPENSSL (openssl));
   len = SSL_get_tlsext_status_ocsp_resp (ssl, &p);
-  if (!p)
+  if (p)
     {
-      /* OpenSSL doesn't provide an API to determine if the chain requires
-       * an OCSP response (known as MustStaple) using the status_request 
-       * X509v3 extension. We also have no way of correctly knowing the full
-       * chain OpenSSL will internally use to do this ourselves.
-       * So for now we silently continue ignoring the missing response.
-       * This does mean that this does not provide real security as an attacker
-       * can easily bypass this.
-       */
-      return 0;
+      resp = d2i_OCSP_RESPONSE (NULL, (const unsigned char **)&p, len);
+      if (!resp)
+        return G_TLS_CERTIFICATE_GENERIC_ERROR;
     }
-
-  resp = d2i_OCSP_RESPONSE (NULL, (const unsigned char **)&p, len);
-  if (!resp)
-    return G_TLS_CERTIFICATE_GENERIC_ERROR;
 
   database = g_tls_connection_get_database (G_TLS_CONNECTION (openssl));
 
@@ -246,12 +253,12 @@ verify_ocsp_response (GTlsClientConnectionOpenssl *openssl,
    */
   g_assert (database);
 
+  /* Note we have to call this even if resp is NULL, because it will check
+   * whether Must-Staple is set.
+   */
   return g_tls_database_openssl_verify_ocsp_response (G_TLS_DATABASE_OPENSSL (database),
                                                       peer_certificate,
                                                       resp);
-#else
-  return 0;
-#endif
 }
 
 static GTlsCertificateFlags
@@ -293,6 +300,8 @@ g_tls_client_connection_openssl_class_init (GTlsClientConnectionOpensslClass *kl
   g_object_class_override_property (gobject_class, PROP_SERVER_IDENTITY, "server-identity");
   g_object_class_override_property (gobject_class, PROP_USE_SSL3, "use-ssl3");
   g_object_class_override_property (gobject_class, PROP_ACCEPTED_CAS, "accepted-cas");
+  g_object_class_override_property (gobject_class, PROP_SESSION_REUSED, "session-reused");
+  g_object_class_override_property (gobject_class, PROP_SESSION_RESUMPTION_ENABLED, "session-resumption-enabled");
 }
 
 static void
@@ -373,9 +382,11 @@ set_cipher_list (GTlsClientConnectionOpenssl  *client,
     {
       if (!SSL_CTX_set_cipher_list (client->ssl_ctx, cipher_list))
         {
+          char error_buffer[256];
+          ERR_error_string_n (ERR_get_error (), error_buffer, sizeof (error_buffer));
           g_set_error (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
                        _("Could not set TLS cipher list: %s"),
-                       ERR_error_string (ERR_get_error (), NULL));
+                       error_buffer);
           return FALSE;
         }
     }
@@ -399,9 +410,11 @@ set_max_protocol (GTlsClientConnectionOpenssl  *client,
         {
           if (!SSL_CTX_set_max_proto_version (client->ssl_ctx, (int)version))
             {
+              char error_buffer[256];
+              ERR_error_string_n (ERR_get_error (), error_buffer, sizeof (error_buffer));
               g_set_error (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
                            _("Could not set MAX protocol to %d: %s"),
-                           (int)version, ERR_error_string (ERR_get_error (), NULL));
+                           (int)version, error_buffer);
               return FALSE;
             }
         }
@@ -439,6 +452,24 @@ set_curve_list (GTlsClientConnectionOpenssl *client)
 }
 #endif
 
+static int g_tls_client_connection_openssl_new_session (SSL *s, SSL_SESSION *sess)
+{
+  GTlsConnectionBase *tls;
+  GTlsClientConnectionOpenssl *client = G_TLS_CLIENT_CONNECTION_OPENSSL (g_tls_connection_openssl_get_connection_from_ssl (s));
+
+  tls = G_TLS_CONNECTION_BASE (client);
+
+  if (g_tls_connection_base_get_session_resumption (tls))
+    g_tls_store_session_data (g_tls_connection_base_get_session_id (G_TLS_CONNECTION_BASE (client)),
+                              (gpointer)sess,
+                              (SessionDup)SSL_SESSION_dup,
+                              (SessionAcquire)SSL_SESSION_up_ref,
+                              (SessionRelease)SSL_SESSION_free,
+                              glib_protocol_version_from_openssl (SSL_SESSION_get_protocol_version (sess)));
+
+  return 0;
+}
+
 static gboolean
 g_tls_client_connection_openssl_initable_init (GInitable       *initable,
                                                GCancellable    *cancellable,
@@ -447,8 +478,17 @@ g_tls_client_connection_openssl_initable_init (GInitable       *initable,
   GTlsClientConnectionOpenssl *client = G_TLS_CLIENT_CONNECTION_OPENSSL (initable);
   long options;
   const char *hostname;
+  char error_buffer[256];
 
-  client->session = SSL_SESSION_new ();
+  client->session = (SSL_SESSION *)g_tls_lookup_session_data (g_tls_connection_base_get_session_id (G_TLS_CONNECTION_BASE (client)));
+  if (!client->session)
+    {
+      client->session = SSL_SESSION_new ();
+    }
+  else
+    {
+      client->session_reused = TRUE;
+    }
 
   client->ssl_ctx = SSL_CTX_new (g_tls_connection_base_is_dtls (G_TLS_CONNECTION_BASE (client))
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L || defined (LIBRESSL_VERSION_NUMBER)
@@ -460,9 +500,10 @@ g_tls_client_connection_openssl_initable_init (GInitable       *initable,
 #endif
   if (!client->ssl_ctx)
     {
+      ERR_error_string_n (ERR_get_error (), error_buffer, sizeof (error_buffer));
       g_set_error (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
                    _("Could not create TLS context: %s"),
-                   ERR_error_string (ERR_get_error (), NULL));
+                   error_buffer);
       return FALSE;
     }
 
@@ -473,8 +514,7 @@ g_tls_client_connection_openssl_initable_init (GInitable       *initable,
     return FALSE;
 
   /* Only TLS 1.2 or higher */
-  options = SSL_OP_NO_TICKET |
-            SSL_OP_NO_COMPRESSION |
+  options = SSL_OP_NO_COMPRESSION |
 #ifdef SSL_OP_NO_TLSv1_1
             SSL_OP_NO_TLSv1_1 |
 #endif
@@ -501,6 +541,11 @@ g_tls_client_connection_openssl_initable_init (GInitable       *initable,
 
   SSL_CTX_set_client_cert_cb (client->ssl_ctx, handshake_thread_retrieve_certificate);
 
+  SSL_CTX_set_session_cache_mode (client->ssl_ctx,
+                                  SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL_STORE);
+
+  SSL_CTX_sess_set_new_cb (client->ssl_ctx, g_tls_client_connection_openssl_new_session);
+
 #ifdef SSL_CTX_set1_sigalgs_list
   set_signature_algorithm_list (client);
 #endif
@@ -512,11 +557,14 @@ g_tls_client_connection_openssl_initable_init (GInitable       *initable,
   client->ssl = SSL_new (client->ssl_ctx);
   if (!client->ssl)
     {
+      ERR_error_string_n (ERR_get_error (), error_buffer, sizeof (error_buffer));
       g_set_error (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
                    _("Could not create TLS connection: %s"),
-                   ERR_error_string (ERR_get_error (), NULL));
+                   error_buffer);
       return FALSE;
     }
+
+  SSL_set_session (client->ssl, client->session);
 
   if (data_index == -1) {
       data_index = SSL_get_ex_new_index (0, (void *)"gtlsclientconnection", NULL, NULL, NULL);
@@ -524,7 +572,7 @@ g_tls_client_connection_openssl_initable_init (GInitable       *initable,
   SSL_set_ex_data (client->ssl, data_index, client);
 
 #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
-  if (hostname)
+  if (hostname && !g_hostname_is_ip_address (hostname))
     SSL_set_tlsext_host_name (client->ssl, hostname);
 #endif
 

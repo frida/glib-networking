@@ -8,12 +8,8 @@ deps = [
   glib_dep,
   gmodule_dep,
   gobject_dep,
-  gnutls_dep
-]
-
-cflags = [
-  '-DSRCDIR="@0@"'.format(meson.current_source_dir()),
-  '-DTOP_BUILDDIR="@0@"'.format(meson.build_root())
+  gnutls_dep,
+  openssl_dep
 ]
 
 envs = [
@@ -52,10 +48,12 @@ test_programs = [
 foreach backend: backends
   foreach program: test_programs
     program_name = program[0] + '-' + backend
+    program_deps = program[2]
 
     test_conf = configuration_data()
     test_conf.set('installed_tests_dir', installed_tests_execdir)
     test_conf.set('program', program_name)
+    test_conf.set('environment', '')
 
     if enable_installed_tests
       configure_file(
@@ -66,11 +64,16 @@ foreach backend: backends
       )
     endif
 
-    test_cflags = cflags + [
+    test_cflags = [
       '-DBACKEND="@0@"'.format(backend),
       '-DBACKEND_IS_' + backend.to_upper(),
       '-DSIZEOF_TIME_T=@0@'.format(cc.sizeof('time_t', prefix: '#include <time.h>')),
+      '-D_GNU_SOURCE',
     ]
+
+    if not ['windows'].contains(host_system)
+      program_deps += cc.find_library('dl')
+    endif
 
     if backend == 'openssl'
       incs += openssl_inc
@@ -80,14 +83,14 @@ foreach backend: backends
       program_name,
       [program[0] + '.c'] + program[1],
       include_directories: incs,
-      dependencies: program[2],
+      dependencies: program_deps,
       c_args: test_cflags,
       install: enable_installed_tests,
       install_dir: installed_tests_execdir
     )
 
     test_envs = envs + [
-      'GIO_MODULE_DIR=' + join_paths(meson.build_root(), 'tls', backend),
+      'GIO_MODULE_DIR=' + join_paths(meson.project_build_root(), 'tls', backend),
       'G_TEST_SRCDIR=@0@'.format(meson.current_source_dir()),
       'G_TEST_BUILDDIR=@0@'.format(meson.current_build_dir())
     ]

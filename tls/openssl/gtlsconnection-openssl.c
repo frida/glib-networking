@@ -250,10 +250,10 @@ end_openssl_io (GTlsConnectionOpenssl  *openssl,
         return G_TLS_CONNECTION_BASE_OK;
 
       if (error && !*error)
-        *error = g_error_new (G_TLS_ERROR, G_TLS_ERROR_EOF, _("%s: The connection is broken"), err_prefix);
+        *error = g_error_new (G_TLS_ERROR, G_TLS_ERROR_EOF, _("%s: The connection is broken"), gettext (err_prefix));
     }
   else if (error && !*error)
-    *error = g_error_new (G_TLS_ERROR, G_TLS_ERROR_MISC, "%s: %s", err_prefix, err_str);
+    *error = g_error_new (G_TLS_ERROR, G_TLS_ERROR_MISC, "%s: %s", gettext (err_prefix), err_str);
 
   return G_TLS_CONNECTION_BASE_ERROR;
 }
@@ -517,7 +517,7 @@ g_tls_connection_openssl_verify_chain (GTlsConnectionBase       *tls,
   return errors;
 }
 
-static GTlsProtocolVersion
+GTlsProtocolVersion
 glib_protocol_version_from_openssl (int protocol_version)
 {
   switch (protocol_version)
@@ -611,7 +611,7 @@ g_tls_connection_openssl_handshake_thread_request_rehandshake (GTlsConnectionBas
 
   return perform_openssl_io (G_TLS_CONNECTION_OPENSSL (tls), G_IO_IN | G_IO_OUT,
                              perform_rehandshake, tls, timeout, cancellable,
-                             NULL, error, _("Error performing TLS handshake"));
+                             NULL, error, N_("Error performing TLS handshake"));
 }
 
 static GTlsCertificate *
@@ -652,6 +652,15 @@ openssl_get_binding_tls_unique (GTlsConnectionOpenssl  *tls,
   gboolean is_client = G_IS_TLS_CLIENT_CONNECTION (tls);
   gboolean resumed = SSL_session_reused (ssl);
   size_t len = 64;
+
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+  if (SSL_version (ssl) >= TLS1_3_VERSION)
+    {
+      g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_GENERAL_ERROR,
+                   _("The request is invalid."));
+      return FALSE;
+    }
+#endif
 
   /* This is a drill */
   if (!data)
@@ -787,18 +796,14 @@ g_tls_connection_openssl_get_channel_binding_data (GTlsConnectionBase      *tls,
 {
   GTlsConnectionOpenssl *openssl = G_TLS_CONNECTION_OPENSSL (tls);
 
-  /* XXX: remove the cast once public enum supports exporter */
-  switch ((int)type)
+  switch (type)
     {
     case G_TLS_CHANNEL_BINDING_TLS_UNIQUE:
       return openssl_get_binding_tls_unique (openssl, data, error);
-      /* fall through */
     case G_TLS_CHANNEL_BINDING_TLS_SERVER_END_POINT:
       return openssl_get_binding_tls_server_end_point (openssl, data, error);
-      /* fall through */
-    case 100500:
+    case G_TLS_CHANNEL_BINDING_TLS_EXPORTER:
       return openssl_get_binding_tls_exporter (openssl, data, error);
-      /* fall through */
     default:
       /* Anyone to implement tls-unique-for-telnet? */
       g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_IMPLEMENTED,
@@ -820,7 +825,7 @@ g_tls_connection_openssl_handshake_thread_handshake (GTlsConnectionBase  *tls,
                                G_IO_IN | G_IO_OUT,
                                (GTlsOpensslIOFunc) SSL_do_handshake,
                                NULL, timeout, cancellable, &ret, error,
-                               _("Error reading data from TLS socket"));
+                               N_("Error reading data from TLS socket"));
 
   if (ret > 0)
     {
@@ -916,7 +921,7 @@ g_tls_connection_openssl_read (GTlsConnectionBase    *tls,
 
   status = perform_openssl_io (G_TLS_CONNECTION_OPENSSL (tls), G_IO_IN,
                                perform_read, &req, timeout, cancellable, &ret,
-                               error, _("Error reading data from TLS socket"));
+                               error, N_("Error reading data from TLS socket"));
 
   *nread = MAX (ret, 0);
   return status;
@@ -995,7 +1000,7 @@ g_tls_connection_openssl_write (GTlsConnectionBase    *tls,
 
   status = perform_openssl_io (G_TLS_CONNECTION_OPENSSL (tls), G_IO_OUT,
                                perform_write, &req, timeout, cancellable, &ret,
-                               error, _("Error writing data to TLS socket"));
+                               error, N_("Error writing data to TLS socket"));
 
   *nwrote = MAX (ret, 0);
   return status;
@@ -1056,7 +1061,7 @@ g_tls_connection_openssl_close (GTlsConnectionBase  *tls,
                              G_IO_IN | G_IO_OUT,
                              (GTlsOpensslIOFunc) SSL_shutdown,
                              NULL, timeout, cancellable, NULL, error,
-                             _("Error performing TLS close"));
+                             N_("Error performing TLS close"));
 }
 
 static void

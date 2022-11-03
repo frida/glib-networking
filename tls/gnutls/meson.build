@@ -20,6 +20,8 @@ deps = [
   tlsbase_dep
 ]
 
+giomodules += 'giognutls'
+
 module = shared_module(
   'giognutls',
   sources: sources,
@@ -28,18 +30,25 @@ module = shared_module(
   link_args: module_ldflags,
   link_depends: symbol_map,
   name_suffix: module_suffix,
-  install: true,
+  install: build_shared,
   install_dir: gio_module_dir,
 )
 
-if get_option('static_modules')
-  # link_whole is a workaround for a meson bug
-  # https://github.com/mesonbuild/meson/pull/3939
-  static_library('giognutls',
-    objects: module.extract_all_objects(),
+if build_static
+  giognutls_lib = static_library('giognutls',
+    objects: module.extract_all_objects(recursive: true),
+    dependencies: deps,
     install: true,
     install_dir: gio_module_dir,
-    link_whole: [tlsbase]
   )
   pkg.generate(module)
+
+  giognutls_dep = declare_dependency(link_with: giognutls_lib)
+  meson.override_dependency('giognutls', giognutls_dep)
+endif
+
+if meson.version().version_compare('>=0.58')
+  env = environment()
+  env.prepend('GIO_EXTRA_MODULES', meson.current_build_dir())
+  meson.add_devenv(env)
 endif

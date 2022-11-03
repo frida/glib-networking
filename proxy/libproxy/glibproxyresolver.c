@@ -73,10 +73,17 @@ g_libproxy_resolver_finalize (GObject *object)
   G_OBJECT_CLASS (g_libproxy_resolver_parent_class)->finalize (object);
 }
 
+static gboolean
+is_running_environment_proxy_test (void)
+{
+  return g_strcmp0 (g_getenv ("GIO_PROXY_TEST_NAME"), "environment") == 0;
+}
+
 static void
 g_libproxy_resolver_init (GLibproxyResolver *resolver)
 {
-  resolver->factory = px_proxy_factory_new ();
+  if (!is_running_environment_proxy_test ())
+    resolver->factory = px_proxy_factory_new ();
 }
 
 static gboolean
@@ -92,6 +99,7 @@ copy_proxies (gchar **proxies)
   gchar **copy;
   int len = 0;
   int i, j;
+  GError *error = NULL;
 
   for (i = 0; proxies[i]; i++)
     {
@@ -104,6 +112,14 @@ copy_proxies (gchar **proxies)
   copy = g_new (gchar *, len + 1);
   for (i = j = 0; proxies[i]; i++, j++)
     {
+      if (!g_uri_is_valid (proxies[i], G_URI_FLAGS_NONE, &error))
+        {
+          g_warning ("Received invalid URI %s from libproxy: %s", proxies[i], error->message);
+          g_clear_error (&error);
+          j--;
+          continue;
+        }
+
       if (!strncmp ("socks://", proxies[i], 8))
         {
           copy[j++] = g_strdup_printf ("socks5://%s", proxies[i] + 8);
@@ -118,21 +134,6 @@ copy_proxies (gchar **proxies)
   copy[j] = NULL;
 
   return copy;
-}
-
-/* FIXME: this function should be removed and replaced by a call to
- * px_proxy_factory_free_proxies() once libproxy 0.4.16 is released.
- * Sadly libproxy does not have any version check macros so it will
- * have to be a hard dep.
- */
-static void
-free_libproxy_proxies (gchar **proxies)
-{
-  int i;
-
-  for (i = 0; proxies[i]; i++)
-    free (proxies[i]);
-  free (proxies);
 }
 
 static void
@@ -156,7 +157,7 @@ get_libproxy_proxies (GTask        *task,
        * three entries ("socks5", "socks4a", "socks4").
        */
       g_task_return_pointer (task, copy_proxies (proxies), (GDestroyNotify) g_strfreev);
-      free_libproxy_proxies (proxies);
+      px_proxy_factory_free_proxies (proxies);
     }
   else
     {
@@ -245,6 +246,6 @@ g_libproxy_resolver_register (GIOModule *module)
   g_io_extension_point_implement (G_PROXY_RESOLVER_EXTENSION_POINT_NAME,
                                   g_libproxy_resolver_get_type(),
                                   "libproxy",
-                                  0);
+                                  10);
 }
 #endif

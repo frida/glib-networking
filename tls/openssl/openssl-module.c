@@ -29,20 +29,10 @@
 #include <gio/gio.h>
 
 #include "gtlsbackend-openssl.h"
+#include "visibility.h"
 
-#ifdef G_IO_MODULE_BUILD_STATIC
 
-#include "gioopenssl.h"
-
-void
-g_io_module_openssl_register (void)
-{
-  g_tls_backend_openssl_register (NULL);
-}
-
-#else
-
-G_MODULE_EXPORT void
+GLIB_NETWORKING_EXPORT void
 g_io_openssl_load (GIOModule *module)
 {
   gchar *locale_dir;
@@ -65,15 +55,13 @@ g_io_openssl_load (GIOModule *module)
   g_free (locale_dir);
 }
 
-G_MODULE_EXPORT void
+GLIB_NETWORKING_EXPORT void
 g_io_openssl_unload (GIOModule *module)
 {
 }
 
-G_MODULE_EXPORT gchar **
+GLIB_NETWORKING_EXPORT gchar **
 g_io_openssl_query (void)
 {
   return g_strsplit (G_TLS_BACKEND_EXTENSION_POINT_NAME, "!", -1);
 }
-
-#endif

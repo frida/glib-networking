@@ -34,6 +34,8 @@ deps = [
   libproxy_dep
 ]
 
+giomodules += 'giolibproxy'
+
 module = shared_module(
   'giolibproxy',
   sources: sources,
@@ -43,17 +45,21 @@ module = shared_module(
   link_args: module_ldflags,
   link_depends: symbol_map,
   name_suffix: module_suffix,
-  install: true,
+  install: build_shared,
   install_dir: gio_module_dir
 )
 
-if get_option('static_modules')
-  static_library('giolibproxy',
-    objects: module.extract_all_objects(),
+if build_static
+  giolibproxy_lib = static_library('giolibproxy',
+    objects: module.extract_all_objects(recursive: true),
+    dependencies: deps,
     install: true,
     install_dir: gio_module_dir
   )
   pkg.generate(module)
+
+  giolibproxy_dep = declare_dependency(link_with: giolibproxy_lib)
+  meson.override_dependency('giolibproxy', giolibproxy_dep)
 endif
 
 sources = files(
@@ -66,9 +72,14 @@ executable(
   sources,
   include_directories: top_inc,
   dependencies: deps,
-  c_args: '-DGLIBPROXY_PACRUNNER',
   install: true,
   install_dir: libexecdir
 )
 
-proxy_test_programs += [['libproxy', deps]]
+proxy_test_programs += [['environment', 'libproxy', deps]]
+
+if meson.version().version_compare('>=0.58')
+  env = environment()
+  env.prepend('GIO_EXTRA_MODULES', meson.current_build_dir())
+  meson.add_devenv(env)
+endif

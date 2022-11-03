@@ -32,8 +32,11 @@
 #include "openssl-include.h"
 
 #ifdef __APPLE__
-#include <dlfcn.h>
 #include <Security/Security.h>
+#endif
+
+#ifdef G_OS_WIN32
+#include <wincrypt.h>
 #endif
 
 typedef struct
@@ -79,34 +82,6 @@ g_tls_database_openssl_init (GTlsDatabaseOpenssl *self)
   priv = g_tls_database_openssl_get_instance_private (self);
 
   g_mutex_init (&priv->mutex);
-}
-
-static GTlsCertificateFlags
-double_check_before_after_dates (GTlsCertificateOpenssl *chain)
-{
-  GTlsCertificateFlags gtls_flags = 0;
-  X509 *cert;
-
-  while (chain)
-    {
-      ASN1_TIME *not_before;
-      ASN1_TIME *not_after;
-
-      cert = g_tls_certificate_openssl_get_cert (chain);
-      not_before = X509_get_notBefore (cert);
-      not_after = X509_get_notAfter (cert);
-
-      if (X509_cmp_current_time (not_before) > 0)
-        gtls_flags |= G_TLS_CERTIFICATE_NOT_ACTIVATED;
-
-      if (X509_cmp_current_time (not_after) < 0)
-        gtls_flags |= G_TLS_CERTIFICATE_EXPIRED;
-
-      chain = G_TLS_CERTIFICATE_OPENSSL (g_tls_certificate_get_issuer
-                                         (G_TLS_CERTIFICATE (chain)));
-    }
-
-  return gtls_flags;
 }
 
 static STACK_OF(X509) *
@@ -169,11 +144,6 @@ g_tls_database_openssl_verify_chain (GTlsDatabase             *database,
   if (g_cancellable_set_error_if_cancelled (cancellable, error))
     return G_TLS_CERTIFICATE_GENERIC_ERROR;
 
-  /* We have to check these ourselves since openssl
-   * does not give us flags and UNKNOWN_CA will take priority.
-   */
-  result |= double_check_before_after_dates (G_TLS_CERTIFICATE_OPENSSL (chain));
-
   if (identity)
     result |= g_tls_certificate_openssl_verify_identity (G_TLS_CERTIFICATE_OPENSSL (chain),
                                                          identity);
@@ -181,45 +151,16 @@ g_tls_database_openssl_verify_chain (GTlsDatabase             *database,
   return result;
 }
 
-static gboolean
-g_tls_database_openssl_populate_trust_list (GTlsDatabaseOpenssl  *self,
-                                            X509_STORE           *store,
-                                            GError              **error)
-{
 #ifdef __APPLE__
-  void *security, *cf;
-  OSStatus (*copy_anchor_certificates) (CFArrayRef _Nullable *anchors);
-  CFDataRef (*certificate_copy_data) (SecCertificateRef certificate);
-  CFIndex (*array_get_count) (CFArrayRef array);
-  const void *(*array_get_value_at_index) (CFArrayRef array, CFIndex idx);
-  const UInt8 *(*data_get_byte_ptr) (CFDataRef data);
-  CFIndex (*data_get_length) (CFDataRef data);
-  void (*release) (CFTypeRef cf);
+static gboolean
+populate_store (X509_STORE  *store,
+                GError     **error)
+{
   CFArrayRef anchors;
   OSStatus ret;
-  CFIndex n, i;
+  CFIndex i;
 
-  security = dlopen ("/System/Library/Frameworks/Security.framework/Security",
-                     RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
-  if (!security)
-    goto not_loaded;
-
-  cf = dlopen ("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation",
-               RTLD_LAZY | RTLD_GLOBAL | RTLD_NOLOAD);
-
-  copy_anchor_certificates = dlsym (security, "SecTrustCopyAnchorCertificates");
-  certificate_copy_data = dlsym (security, "SecCertificateCopyData");
-
-  array_get_count = dlsym (cf, "CFArrayGetCount");
-  array_get_value_at_index = dlsym (cf, "CFArrayGetValueAtIndex");
-  data_get_byte_ptr = dlsym (cf, "CFDataGetBytePtr");
-  data_get_length = dlsym (cf, "CFDataGetLength");
-  release = dlsym (cf, "CFRelease");
-
-  dlclose (cf);
-  dlclose (security);
-
-  ret = copy_anchor_certificates (&anchors);
+  ret = SecTrustCopyAnchorCertificates (&anchors);
   if (ret != errSecSuccess)
     {
       g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
@@ -227,43 +168,105 @@ g_tls_database_openssl_populate_trust_list (GTlsDatabaseOpenssl  *self,
       return FALSE;
     }
 
-  n = array_get_count (anchors);
-  for (i = 0; i < n; i++)
+  for (i = 0; i < CFArrayGetCount (anchors); i++)
     {
       SecCertificateRef cert;
       CFDataRef data;
 
-      cert = (SecCertificateRef)array_get_value_at_index (anchors, i);
-      data = certificate_copy_data (cert);
+      cert = (SecCertificateRef)CFArrayGetValueAtIndex (anchors, i);
+      data = SecCertificateCopyData (cert);
       if (data)
         {
           X509 *x;
           const unsigned char *pdata;
 
-          pdata = (const unsigned char *)data_get_byte_ptr (data);
+          pdata = (const unsigned char *)CFDataGetBytePtr (data);
 
-          x = d2i_X509 (NULL, &pdata, data_get_length (data));
+          x = d2i_X509 (NULL, &pdata, CFDataGetLength (data));
           if (x)
             X509_STORE_add_cert (store, x);
 
-          release (data);
+          CFRelease (data);
         }
     }
 
-  release (anchors);
+  CFRelease (anchors);
+  return TRUE;
+}
 
-not_loaded:
-#endif
+#elif defined(G_OS_WIN32)
+static gboolean
+add_certs_from_store (const gunichar2 *source_cert_store_name,
+                      X509_STORE      *store)
+{
+  HANDLE store_handle;
+  PCCERT_CONTEXT cert_context = NULL;
 
-  if (!X509_STORE_set_default_paths (store))
+  store_handle = CertOpenSystemStoreW (0, source_cert_store_name);
+  if (store_handle == NULL)
+    return FALSE;
+
+  while (cert_context = CertEnumCertificatesInStore (store_handle, cert_context))
     {
-      g_set_error (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
-                   _("Failed to load system trust store: %s"),
-                   ERR_error_string (ERR_get_error (), NULL));
+      X509 *x;
+      const unsigned char *pdata;
+
+      pdata = (const unsigned char *)cert_context->pbCertEncoded;
+
+      x = d2i_X509 (NULL, &pdata, cert_context->cbCertEncoded);
+      if (x)
+        X509_STORE_add_cert (store, x);
+    }
+
+  CertCloseStore (store_handle, 0);
+  return TRUE;
+}
+
+static gboolean
+populate_store (X509_STORE  *store,
+                GError     **error)
+{
+  if (!add_certs_from_store (L"ROOT", store))
+    {
+      g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
+                           _("Could not get root certificate store"));
+      return FALSE;
+    }
+
+  if (!add_certs_from_store (L"CA", store))
+    {
+      g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
+                           _("Could not get CA certificate store"));
       return FALSE;
     }
 
   return TRUE;
+}
+#else
+static gboolean
+populate_store (X509_STORE  *store,
+                GError     **error)
+{
+  if (!X509_STORE_set_default_paths (store))
+    {
+      char error_buffer[256];
+      ERR_error_string_n (ERR_get_error (), error_buffer, sizeof (error_buffer));
+      g_set_error (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
+                   _("Failed to load system trust store: %s"),
+                   error_buffer);
+      return FALSE;
+    }
+
+  return TRUE;
+}
+#endif
+
+static gboolean
+g_tls_database_openssl_populate_trust_list (GTlsDatabaseOpenssl  *self,
+                                            X509_STORE           *store,
+                                            GError              **error)
+{
+  return populate_store (store, error);
 }
 
 static void
@@ -345,19 +348,66 @@ g_tls_database_openssl_new (GError **error)
   return g_initable_new (G_TYPE_TLS_DATABASE_OPENSSL, NULL, error, NULL);
 }
 
+static gboolean
+check_for_ocsp_must_staple (X509 *cert)
+{
+  int idx = -1; /* We ignore the return of this as we only expect one extension. */
+  STACK_OF(ASN1_INTEGER) *features = X509_get_ext_d2i (cert, NID_tlsfeature, NULL, &idx);
+
+  if (!features)
+    return FALSE;
+
+  for (guint i = 0; i < sk_ASN1_INTEGER_num (features); i++)
+    {
+      const long feature_id = ASN1_INTEGER_get (sk_ASN1_INTEGER_value (features, i));
+      if (feature_id == 5 || feature_id == 17) /* status_request, status_request_v2 */
+        {
+          sk_ASN1_INTEGER_pop_free (features, ASN1_INTEGER_free);
+          return TRUE;
+        }
+    }
+
+  sk_ASN1_INTEGER_pop_free (features, ASN1_INTEGER_free);
+  return FALSE;
+}
+
 GTlsCertificateFlags
 g_tls_database_openssl_verify_ocsp_response (GTlsDatabaseOpenssl *self,
                                              GTlsCertificate     *chain,
                                              OCSP_RESPONSE       *resp)
 {
   GTlsCertificateFlags errors = 0;
-#if (OPENSSL_VERSION_NUMBER >= 0x0090808fL) && !defined(OPENSSL_NO_TLSEXT) && \
-  !defined(OPENSSL_NO_OCSP)
   GTlsDatabaseOpensslPrivate *priv;
   STACK_OF(X509) *chain_openssl = NULL;
   OCSP_BASICRESP *basic_resp = NULL;
   int ocsp_status = 0;
   int i;
+
+  chain_openssl = convert_certificate_chain_to_openssl (G_TLS_CERTIFICATE_OPENSSL (chain));
+  priv = g_tls_database_openssl_get_instance_private (self);
+  if ((chain_openssl == NULL) ||
+      (priv->store == NULL))
+    {
+      errors = G_TLS_CERTIFICATE_GENERIC_ERROR;
+      goto end;
+    }
+
+  /* OpenSSL doesn't provide an API to determine if the chain requires
+   * an OCSP response (known as Must-Staple) using the status_request
+   * X509v3 extension. We also seem to have no way of correctly knowing the
+   * final certificate path that OpenSSL will internally use, so can't do it
+   * ourselves. So for now we will check only the server certificate to see if
+   * it sets Must-Staple. This is inconsistent with GnuTLS's behavior, but it
+   * seems to be the best we can do. Checking *every* certificate for Must-
+   * Staple would be wrong because we don't want to check certificates that
+   * OpenSSL does not actually use as part of its final certification path.
+   */
+  if (resp == NULL)
+    {
+      if (check_for_ocsp_must_staple (sk_X509_value (chain_openssl, 0)))
+        errors = G_TLS_CERTIFICATE_GENERIC_ERROR;
+      goto end;
+    }
 
   ocsp_status = OCSP_response_status (resp);
   if (ocsp_status != OCSP_RESPONSE_STATUS_SUCCESSFUL)
@@ -368,15 +418,6 @@ g_tls_database_openssl_verify_ocsp_response (GTlsDatabaseOpenssl *self,
 
   basic_resp = OCSP_response_get1_basic (resp);
   if (basic_resp == NULL)
-    {
-      errors = G_TLS_CERTIFICATE_GENERIC_ERROR;
-      goto end;
-    }
-
-  chain_openssl = convert_certificate_chain_to_openssl (G_TLS_CERTIFICATE_OPENSSL (chain));
-  priv = g_tls_database_openssl_get_instance_private (self);
-  if ((chain_openssl == NULL) ||
-      (priv->store == NULL))
     {
       errors = G_TLS_CERTIFICATE_GENERIC_ERROR;
       goto end;
@@ -437,6 +478,5 @@ end:
   if (resp)
     OCSP_RESPONSE_free (resp);
 
-#endif
   return errors;
 }

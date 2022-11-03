@@ -27,6 +27,7 @@
 
 #include <string.h>
 #include "openssl-include.h"
+#include <openssl/pkcs12.h>
 
 #include "gtlscertificate-openssl.h"
 #include <glib/gi18n-lib.h>
@@ -37,6 +38,9 @@ struct _GTlsCertificateOpenssl
 
   X509 *cert;
   EVP_PKEY *key;
+
+  GByteArray *pkcs12_data;
+  char *password;
 
   GTlsCertificateOpenssl *issuer;
 
@@ -61,9 +65,12 @@ enum
   PROP_ISSUER_NAME,
   PROP_DNS_NAMES,
   PROP_IP_ADDRESSES,
+  PROP_PKCS12_DATA,
+  PROP_PASSWORD,
 };
 
 static void     g_tls_certificate_openssl_initable_iface_init (GInitableIface  *iface);
+static gboolean is_issuer (GTlsCertificateOpenssl *cert, GTlsCertificateOpenssl *issuer);
 
 G_DEFINE_TYPE_WITH_CODE (GTlsCertificateOpenssl, g_tls_certificate_openssl, G_TYPE_TLS_CERTIFICATE,
                          G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
@@ -78,6 +85,9 @@ g_tls_certificate_openssl_finalize (GObject *object)
     X509_free (openssl->cert);
   if (openssl->key)
     EVP_PKEY_free (openssl->key);
+
+  g_clear_pointer (&openssl->pkcs12_data, g_byte_array_unref);
+  g_clear_pointer (&openssl->password, g_free);
 
   g_clear_object (&openssl->issuer);
 
@@ -144,7 +154,7 @@ export_privkey_to_der (GTlsCertificateOpenssl  *openssl,
                        guint8                 **output_data,
                        long                    *output_size)
 {
-  PKCS8_PRIV_KEY_INFO *pkcs8;
+  PKCS8_PRIV_KEY_INFO *pkcs8 = NULL;
   BIO *bio = NULL;
   const guint8 *data;
 
@@ -206,6 +216,103 @@ out:
 }
 
 static void
+maybe_import_pkcs12 (GTlsCertificateOpenssl *openssl)
+{
+  PKCS12 *p12 = NULL;
+  X509 *cert = NULL;
+  STACK_OF(X509) *ca = NULL;
+  EVP_PKEY *key = NULL;
+  BIO *bio = NULL;
+  int status;
+  char error_buffer[256] = { 0 };
+  GTlsError error_code = G_TLS_ERROR_BAD_CERTIFICATE;
+
+  /* If password is set first. */
+  if (!openssl->pkcs12_data)
+    return;
+
+  bio = BIO_new (BIO_s_mem ());
+  status = BIO_write (bio, openssl->pkcs12_data->data, openssl->pkcs12_data->len);
+  if (status <= 0)
+    goto import_failed;
+  g_assert (status == openssl->pkcs12_data->len);
+
+  p12 = d2i_PKCS12_bio (bio, NULL);
+  if (p12 == NULL)
+    goto import_failed;
+
+  status = PKCS12_parse (p12, openssl->password, &key, &cert, &ca);
+  g_clear_pointer (&bio, BIO_free_all);
+
+  if (status != 1)
+    {
+      if (ERR_GET_REASON (ERR_peek_last_error ()) == PKCS12_R_MAC_VERIFY_FAILURE)
+        error_code = G_TLS_ERROR_BAD_CERTIFICATE_PASSWORD;
+      goto import_failed;
+    }
+
+  /* Clear a previous error to load without a password. */
+  if (g_error_matches (openssl->construct_error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE_PASSWORD))
+    g_clear_error (&openssl->construct_error);
+
+  if (cert)
+    {
+      openssl->cert = g_steal_pointer (&cert);
+      openssl->have_cert = TRUE;
+    }
+
+  if (ca)
+    {
+      GTlsCertificateOpenssl *last_cert = openssl;
+
+      for (guint i = 0; i < sk_X509_num (ca); )
+        {
+          GTlsCertificateOpenssl *new_cert;
+          new_cert = G_TLS_CERTIFICATE_OPENSSL (g_tls_certificate_openssl_new_from_x509 (sk_X509_value (ca, i),
+                                                                                         NULL));
+
+          if (is_issuer (last_cert, new_cert))
+            {
+              g_tls_certificate_openssl_set_issuer (last_cert, new_cert);
+              last_cert = new_cert;
+
+              /* Start the list over to find an issuer of the new cert. */
+              sk_X509_delete (ca, i);
+              i = 0;
+            }
+          else
+            i++;
+
+          g_object_unref (new_cert);
+        }
+
+      sk_X509_pop_free (ca, X509_free);
+      ca = NULL;
+    }
+
+  if (key)
+    {
+      openssl->key = g_steal_pointer (&key);
+      openssl->have_key = TRUE;
+    }
+
+  g_clear_pointer (&p12, PKCS12_free);
+  return;
+
+import_failed:
+  g_clear_error (&openssl->construct_error);
+
+  if (!error_buffer[0])
+    ERR_error_string_n (ERR_get_error (), error_buffer, sizeof (error_buffer));
+
+  g_set_error (&openssl->construct_error, G_TLS_ERROR, error_code,
+              _("Failed to import PKCS #12: %s"), error_buffer);
+
+  g_clear_pointer (&p12, PKCS12_free);
+  g_clear_pointer (&bio, BIO_free_all);
+}
+
+static void
 g_tls_certificate_openssl_get_property (GObject    *object,
                                         guint       prop_id,
                                         GValue     *value,
@@ -228,6 +335,10 @@ g_tls_certificate_openssl_get_property (GObject    *object,
 
   switch (prop_id)
     {
+    case PROP_PKCS12_DATA:
+      g_value_set_boxed (value, openssl->pkcs12_data);
+      break;
+
     case PROP_CERTIFICATE:
       /* NOTE: we do the two calls to avoid openssl allocating the buffer for us */
       size = i2d_X509 (openssl->cert, NULL);
@@ -330,6 +441,33 @@ g_tls_certificate_openssl_get_property (GObject    *object,
     }
 }
 
+#define CRITICAL_IF_KEY_INITIALIZED(property_name) G_STMT_START \
+  { \
+    if (openssl->have_key) \
+      { \
+        g_critical ("GTlsCertificate: Failed to set construct property \"%s\" because a private key was already set earlier during construction.", property_name); \
+        return; \
+      } \
+  } \
+G_STMT_END
+
+#define CRITICAL_IF_CERTIFICATE_INITIALIZED(property_name) G_STMT_START \
+  { \
+    if (openssl->have_cert) \
+      { \
+        g_critical ("GTlsCertificate: Failed to set construct property \"%s\" because a certificate was already set earlier during construction.", property_name); \
+        return; \
+      } \
+  } \
+G_STMT_END
+
+#define CRITICAL_IF_INITIALIZED(property_name) G_STMT_START \
+  { \
+    CRITICAL_IF_CERTIFICATE_INITIALIZED (property_name); \
+    CRITICAL_IF_KEY_INITIALIZED (property_name); \
+  } \
+G_STMT_END
+
 static void
 g_tls_certificate_openssl_set_property (GObject      *object,
                                        guint         prop_id,
@@ -341,14 +479,33 @@ g_tls_certificate_openssl_set_property (GObject      *object,
   guint8 *data;
   BIO *bio;
   const char *string;
+  char error_buffer[256];
 
   switch (prop_id)
     {
+    case PROP_PASSWORD:
+      openssl->password = g_value_dup_string (value);
+      if (openssl->password)
+        {
+          CRITICAL_IF_INITIALIZED ("password");
+          maybe_import_pkcs12 (openssl);
+        }
+      break;
+
+    case PROP_PKCS12_DATA:
+      openssl->pkcs12_data = g_value_dup_boxed (value);
+      if (openssl->pkcs12_data)
+        {
+          CRITICAL_IF_INITIALIZED ("pkcs12-data");
+          maybe_import_pkcs12 (openssl);
+        }
+      break;
+
     case PROP_CERTIFICATE:
       bytes = g_value_get_boxed (value);
       if (!bytes)
         break;
-      g_return_if_fail (openssl->have_cert == FALSE);
+      CRITICAL_IF_CERTIFICATE_INITIALIZED ("certificate");
       /* see that we cannot use bytes->data directly since it will move the pointer */
       data = bytes->data;
       openssl->cert = d2i_X509 (NULL, (const unsigned char **)&data, bytes->len);
@@ -356,10 +513,11 @@ g_tls_certificate_openssl_set_property (GObject      *object,
         openssl->have_cert = TRUE;
       else if (!openssl->construct_error)
         {
+          ERR_error_string_n (ERR_get_error (), error_buffer, sizeof (error_buffer));
           openssl->construct_error =
             g_error_new (G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE,
                          _("Could not parse DER certificate: %s"),
-                         ERR_error_string (ERR_get_error (), NULL));
+                         error_buffer);
         }
 
       break;
@@ -368,7 +526,7 @@ g_tls_certificate_openssl_set_property (GObject      *object,
       string = g_value_get_string (value);
       if (!string)
         break;
-      g_return_if_fail (openssl->have_cert == FALSE);
+      CRITICAL_IF_CERTIFICATE_INITIALIZED ("certificate-pem");
       bio = BIO_new_mem_buf ((gpointer)string, -1);
       openssl->cert = PEM_read_bio_X509 (bio, NULL, NULL, NULL);
       BIO_free (bio);
@@ -376,10 +534,11 @@ g_tls_certificate_openssl_set_property (GObject      *object,
         openssl->have_cert = TRUE;
       else if (!openssl->construct_error)
         {
+          ERR_error_string_n (ERR_get_error (), error_buffer, sizeof (error_buffer));
           openssl->construct_error =
             g_error_new (G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE,
                          _("Could not parse PEM certificate: %s"),
-                         ERR_error_string (ERR_get_error (), NULL));
+                         error_buffer);
         }
       break;
 
@@ -387,7 +546,8 @@ g_tls_certificate_openssl_set_property (GObject      *object,
       bytes = g_value_get_boxed (value);
       if (!bytes)
         break;
-      g_return_if_fail (openssl->have_key == FALSE);
+      CRITICAL_IF_KEY_INITIALIZED ("private-key");
+
       bio = BIO_new_mem_buf (bytes->data, bytes->len);
       openssl->key = d2i_PrivateKey_bio (bio, NULL);
       BIO_free (bio);
@@ -395,10 +555,11 @@ g_tls_certificate_openssl_set_property (GObject      *object,
         openssl->have_key = TRUE;
       else if (!openssl->construct_error)
         {
+          ERR_error_string_n (ERR_get_error (), error_buffer, sizeof (error_buffer));
           openssl->construct_error =
             g_error_new (G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE,
                          _("Could not parse DER private key: %s"),
-                         ERR_error_string (ERR_get_error (), NULL));
+                         error_buffer);
         }
       break;
 
@@ -406,7 +567,8 @@ g_tls_certificate_openssl_set_property (GObject      *object,
       string = g_value_get_string (value);
       if (!string)
         break;
-      g_return_if_fail (openssl->have_key == FALSE);
+      CRITICAL_IF_KEY_INITIALIZED ("private-key-pem");
+
       bio = BIO_new_mem_buf ((gpointer)string, -1);
       openssl->key = PEM_read_bio_PrivateKey (bio, NULL, NULL, NULL);
       BIO_free (bio);
@@ -414,10 +576,11 @@ g_tls_certificate_openssl_set_property (GObject      *object,
         openssl->have_key = TRUE;
       else if (!openssl->construct_error)
         {
+          ERR_error_string_n (ERR_get_error (), error_buffer, sizeof (error_buffer));
           openssl->construct_error =
             g_error_new (G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE,
                          _("Could not parse PEM private key: %s"),
-                         ERR_error_string (ERR_get_error (), NULL));
+                         error_buffer);
         }
       break;
 
@@ -441,6 +604,9 @@ g_tls_certificate_openssl_initable_init (GInitable       *initable,
                                          GError         **error)
 {
   GTlsCertificateOpenssl *openssl = G_TLS_CERTIFICATE_OPENSSL (initable);
+
+  /* After init we don't need to keep the password around. */
+  g_clear_pointer (&openssl->password, g_free);
 
   if (openssl->construct_error)
     {
@@ -467,7 +633,6 @@ g_tls_certificate_openssl_verify (GTlsCertificate     *cert,
   GTlsCertificateFlags gtls_flags;
   X509 *x;
   STACK_OF(X509) *untrusted;
-  gint i;
 
   cert_openssl = G_TLS_CERTIFICATE_OPENSSL (cert);
   x = cert_openssl->cert;
@@ -509,22 +674,6 @@ g_tls_certificate_openssl_verify (GTlsCertificate     *cert,
       X509_STORE_free (store);
     }
 
-  /* We have to check these ourselves since openssl
-   * does not give us flags and UNKNOWN_CA will take priority.
-   */
-  for (i = 0; i < sk_X509_num (untrusted); i++)
-    {
-      X509 *c = sk_X509_value (untrusted, i);
-      ASN1_TIME *not_before = X509_get_notBefore (c);
-      ASN1_TIME *not_after = X509_get_notAfter (c);
-
-      if (X509_cmp_current_time (not_before) > 0)
-        gtls_flags |= G_TLS_CERTIFICATE_NOT_ACTIVATED;
-
-      if (X509_cmp_current_time (not_after) < 0)
-        gtls_flags |= G_TLS_CERTIFICATE_EXPIRED;
-    }
-
   sk_X509_free (untrusted);
 
   if (identity)
@@ -556,6 +705,8 @@ g_tls_certificate_openssl_class_init (GTlsCertificateOpensslClass *klass)
   g_object_class_override_property (gobject_class, PROP_ISSUER_NAME, "issuer-name");
   g_object_class_override_property (gobject_class, PROP_DNS_NAMES, "dns-names");
   g_object_class_override_property (gobject_class, PROP_IP_ADDRESSES, "ip-addresses");
+  g_object_class_override_property (gobject_class, PROP_PKCS12_DATA, "pkcs12-data");
+  g_object_class_override_property (gobject_class, PROP_PASSWORD, "password");
 }
 
 static void

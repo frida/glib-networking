@@ -1,3 +1,72 @@
+2.74.0 - September 15, 2022
+===========================
+
+- Updated translations
+
+2.74.rc - September 1, 2022
+===========================
+
+ - Support PKCS #12 encrypted certificates (!184, Patrick Griffis)
+ - Various improvements to Meson build system (!214, Xavier Claessens)
+ - Multiple fixes for proxy tests (!222)
+
+2.74.beta - August 5, 2022
+==========================
+
+ - Drop environment proxy resolver to lowest priority (#190)
+ - Expose implementation of G_TLS_CHANNEL_BINDING_EXPORTER (#191)
+ - Add build option for environment proxy resolver (!217)
+
+2.74.alpha - July 7, 2022
+=========================
+
+ - Add build option for toggling debug logging (#188)
+ - Move gettext() usage out of hot paths (#188)
+ - Fix tests build when using openssl (!211, Nirbheek Chauhan)
+ - Properly free libproxy lookup results and require libproxy 0.4.16 (!212)
+ - Add additional validation for proxy lookup results (!212)
+ - Allow using static libraries via meson subprojects (!213, Olivier Crête)
+ - Updated translations
+
+2.72.1 - June 29, 2022
+======================
+
+ - Discard empty proxy environment variables (#189)
+
+2.72.0 - March 22, 2022
+=======================
+
+ - Fix proxy tests (#186)
+ - GnuTLS: use IANA-style ciphersuite names with GnuTLS 3.7.4 (!202)
+ - Windows build fixes (!206, !207, Chun-wei Fan)
+ - meson devenv (!208, Xavier Claessens)
+ - Updated translations
+
+2.72.beta - February 11, 2022
+=============================
+
+ - Add environment variable proxy resolver (#162)
+ - OpenSSL: fix uninitialized memory use (!201, Daniel Kolesa)
+
+2.72.alpha - January 6, 2022
+============================
+
+ - OpenSSL: fix unsafe error handling (!187, Patrick Griffis)
+ - Correctly load libsoup DLL on Windows (!190, Chun-wei Fan)
+ - OpenSSL: use system trust on Windows (!192, Francesco Conti)
+ - GnuTLS: fix TLS 1.3 ciphersuite names, should use underscores (!194)
+ - OpenSSL: fail when appropriate if Must-Staple extension is set (!197)
+ - Improve failure of tls-unique channel binding requests (!198, Ruslan Marchenko)
+ - Do not fill SNI extension with IP address (!200, Matteo Biggio)
+
+2.70.1 - December 6, 2021
+=========================
+
+ - Fix crashes when handshake is cancelled (#97, #176)
+ - OpenSSL: fix spurious certificate expired verification errors (#179)
+ - GnuTLS: Fix tests on 32-bit systems (!188, Simon McVittie)
+ - GnuTLS: Fix crash when invalid priority string is forced (!189)
+
 2.70.0 - September 16, 2021
 ===========================
 

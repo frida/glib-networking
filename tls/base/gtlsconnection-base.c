@@ -164,6 +164,9 @@ G_GNUC_END_IGNORE_DEPRECATIONS
 
   GTlsProtocolVersion  protocol_version;
   gchar               *ciphersuite_name;
+
+  gchar       *session_id;
+  gboolean     session_resumption_enabled;
 } GTlsConnectionBasePrivate;
 
 static void g_tls_connection_base_dtls_connection_iface_init (GDtlsConnectionInterface *iface);
@@ -216,7 +219,9 @@ enum
   PROP_ADVERTISED_PROTOCOLS,
   PROP_NEGOTIATED_PROTOCOL,
   PROP_PROTOCOL_VERSION,
-  PROP_CIPHERSUITE_NAME
+  PROP_CIPHERSUITE_NAME,
+  PROP_SESSION_RESUMPTION_ENABLED,
+  PROP_SESSION_REUSED
 };
 
 gboolean
@@ -227,6 +232,20 @@ g_tls_connection_base_is_dtls (GTlsConnectionBase *tls)
   return priv->base_socket != NULL;
 }
 
+gboolean
+g_tls_connection_base_get_session_resumption (GTlsConnectionBase *tls)
+{
+  GTlsConnectionBasePrivate *priv = g_tls_connection_base_get_instance_private (tls);
+  return priv->session_resumption_enabled;
+}
+
+void
+g_tls_connection_base_set_session_resumption (GTlsConnectionBase *tls, gboolean session_resumption_enabled)
+{
+  GTlsConnectionBasePrivate *priv = g_tls_connection_base_get_instance_private (tls);
+  priv->session_resumption_enabled = session_resumption_enabled;
+}
+
 static void
 g_tls_connection_base_init (GTlsConnectionBase *tls)
 {
@@ -235,6 +254,23 @@ g_tls_connection_base_init (GTlsConnectionBase *tls)
   priv->need_handshake = TRUE;
   priv->database_is_unset = TRUE;
   priv->is_system_certdb = TRUE;
+
+  /* The testsuite expects handshakes to actually happen. E.g. a test might
+   * check to see that a handshake succeeds and then later check that a new
+   * handshake fails. If we get really unlucky and the same port number is
+   * reused for the server socket between connections, then we'll accidentally
+   * resume the old session and skip certificate verification. Such failures
+   * are difficult to debug because they require running the tests hundreds of
+   * times simultaneously to reproduce (the port number does not get reused
+   * quickly enough if the tests are run sequentially).
+   *
+   * On top of that if using a hostname the session id would be used for all
+   * the connections in the tests.
+   *
+   * This variable allows tests to enable session resumption only when needed
+   * whilst keeping the feature enabled for other uses of the library.
+   */
+  priv->session_resumption_enabled = !g_test_initialized ();
 
   g_mutex_init (&priv->verify_certificate_mutex);
   g_cond_init (&priv->verify_certificate_condition);
@@ -288,6 +324,8 @@ g_tls_connection_base_finalize (GObject *object)
   g_clear_pointer (&priv->negotiated_protocol, g_free);
 
   g_clear_pointer (&priv->ciphersuite_name, g_free);
+
+  g_free (priv->session_id);
 
   G_OBJECT_CLASS (g_tls_connection_base_parent_class)->finalize (object);
 }
@@ -364,6 +402,14 @@ g_tls_connection_base_get_property (GObject    *object,
 
     case PROP_CIPHERSUITE_NAME:
       g_value_set_string (value, priv->ciphersuite_name);
+      break;
+
+    case PROP_SESSION_REUSED:
+      g_value_set_boolean (value, FALSE);
+      break;
+    
+    case PROP_SESSION_RESUMPTION_ENABLED:
+      g_value_set_boolean (value, priv->session_resumption_enabled);
       break;
 
     default:
@@ -467,6 +513,14 @@ g_tls_connection_base_set_property (GObject      *object,
     case PROP_ADVERTISED_PROTOCOLS:
       g_clear_pointer (&priv->advertised_protocols, g_strfreev);
       priv->advertised_protocols = g_value_dup_boxed (value);
+      break;
+
+    case PROP_SESSION_REUSED:
+      g_assert_not_reached ();
+      break;
+
+    case PROP_SESSION_RESUMPTION_ENABLED:
+      priv->session_resumption_enabled = g_value_get_boolean (value);
       break;
 
     default:
@@ -1253,6 +1307,17 @@ g_tls_connection_base_condition_wait (GDatagramBased  *datagram_based,
   return !g_cancellable_set_error_if_cancelled (cancellable, error);
 }
 
+static const gchar *
+get_server_identity (GSocketConnectable *server_identity)
+{
+  if (G_IS_NETWORK_ADDRESS (server_identity))
+    return g_network_address_get_hostname (G_NETWORK_ADDRESS (server_identity));
+  else if (G_IS_NETWORK_SERVICE (server_identity))
+    return g_network_service_get_domain (G_NETWORK_SERVICE (server_identity));
+  else
+    return NULL;
+}
+
 static GTlsCertificateFlags
 verify_peer_certificate (GTlsConnectionBase *tls,
                          GTlsCertificate    *peer_certificate)
@@ -1741,7 +1806,6 @@ g_tls_connection_base_handshake (GTlsConnection   *conn,
   task = g_task_new (conn, cancellable, sync_handshake_thread_completed, NULL);
   g_task_set_source_tag (task, g_tls_connection_base_handshake);
   g_task_set_name (task, "[glib-networking] g_tls_connection_base_handshake");
-  g_task_set_return_on_cancel (task, TRUE);
 
   timeout = g_new0 (gint64, 1);
   *timeout = -1; /* blocking */
@@ -1984,7 +2048,6 @@ do_implicit_handshake (GTlsConnectionBase  *tls,
 
       g_mutex_unlock (&priv->op_mutex);
 
-      g_task_set_return_on_cancel (priv->implicit_handshake, TRUE);
       g_task_run_in_thread (priv->implicit_handshake, handshake_thread);
 
       crank_sync_handshake_context (tls, cancellable);
@@ -2769,6 +2832,95 @@ g_tls_connection_base_handshake_thread_buffer_application_data (GTlsConnectionBa
   g_byte_array_append (priv->app_data_buf, data, length);
 }
 
+gchar *
+g_tls_connection_base_get_session_id (GTlsConnectionBase *tls)
+{
+  GTlsConnectionBasePrivate *priv = g_tls_connection_base_get_instance_private (tls);
+  return priv->session_id;
+}
+
+static void
+g_tls_connection_base_constructed (GObject *object)
+{
+  GTlsConnectionBase *tls = G_TLS_CONNECTION_BASE (object);
+  if (G_IS_TLS_CLIENT_CONNECTION (tls))
+    {
+      GSocketConnection *base_conn;
+
+      /* Create a TLS "session ID." We base it on the IP address since
+       * different hosts serving the same hostname/service will probably
+       * not share the same session cache. We base it on the
+       * server-identity because at least some servers will fail (rather
+       * than just failing to resume the session) if we don't.
+       * (https://bugs.launchpad.net/bugs/823325)
+       *
+       * Note that our session IDs have no relation to TLS protocol
+       * session IDs.
+       */
+      g_object_get (G_OBJECT (tls), "base-io-stream", &base_conn, NULL);
+      if (G_IS_SOCKET_CONNECTION (base_conn))
+        {
+          GSocketAddress *remote_addr;
+          remote_addr = g_socket_connection_get_remote_address (base_conn, NULL);
+          if (G_IS_INET_SOCKET_ADDRESS (remote_addr))
+            {
+              gchar *cert_hash = NULL;
+              GTlsCertificate *cert = NULL;
+              GTlsConnectionBasePrivate *priv = NULL;
+              const gchar *server_hostname = get_server_identity (!g_tls_connection_base_is_dtls (tls) ?
+                                                                  g_tls_client_connection_get_server_identity (G_TLS_CLIENT_CONNECTION (tls)) :
+                                                                  g_dtls_client_connection_get_server_identity (G_DTLS_CLIENT_CONNECTION (tls)));
+              priv = g_tls_connection_base_get_instance_private (tls);
+
+              /* If we have a certificate, make its hash part of the session ID, so
+               * that different connections to the same server can use different
+               * certificates.
+               */
+              g_object_get (G_OBJECT (tls), "certificate", &cert, NULL);
+              if (cert)
+                {
+                  GByteArray *der = NULL;
+                  g_object_get (G_OBJECT (cert), "certificate", &der, NULL);
+                  if (der)
+                    {
+                      cert_hash = g_compute_checksum_for_data (G_CHECKSUM_SHA256, der->data, der->len);
+                      g_byte_array_unref (der);
+                    }
+                  g_object_unref (cert);
+                }
+
+              if (server_hostname)
+                {
+                  priv->session_id = g_strdup_printf ("%s/%s", server_hostname,
+                                                      cert_hash ? cert_hash : "");
+                }
+              else
+                {
+                  guint port;
+                  GInetAddress *iaddr;
+                  gchar *addrstr = NULL;
+                  GInetSocketAddress *isaddr = G_INET_SOCKET_ADDRESS (remote_addr);
+
+                  port = g_inet_socket_address_get_port (isaddr);
+                  iaddr = g_inet_socket_address_get_address (isaddr);
+                  addrstr = g_inet_address_to_string (iaddr);
+
+                  priv->session_id = g_strdup_printf ("%s/%d/%s", addrstr,
+                                                      port,
+                                                      cert_hash ? cert_hash : "");
+                  g_free (addrstr);
+                }
+              g_free (cert_hash);
+            }
+          g_object_unref (remote_addr);
+        }
+      g_object_unref (base_conn);
+    }
+
+  if (G_OBJECT_CLASS (g_tls_connection_base_parent_class)->constructed)
+    G_OBJECT_CLASS (g_tls_connection_base_parent_class)->constructed (object);
+}
+
 static void
 g_tls_connection_base_class_init (GTlsConnectionBaseClass *klass)
 {
@@ -2779,6 +2931,7 @@ g_tls_connection_base_class_init (GTlsConnectionBaseClass *klass)
   gobject_class->get_property = g_tls_connection_base_get_property;
   gobject_class->set_property = g_tls_connection_base_set_property;
   gobject_class->finalize     = g_tls_connection_base_finalize;
+  gobject_class->constructed  = g_tls_connection_base_constructed;
 
   connection_class->handshake               = g_tls_connection_base_handshake;
   connection_class->handshake_async         = g_tls_connection_base_handshake_async;
@@ -2796,6 +2949,23 @@ g_tls_connection_base_class_init (GTlsConnectionBaseClass *klass)
 
   klass->push_io = g_tls_connection_base_real_push_io;
   klass->pop_io = g_tls_connection_base_real_pop_io;
+
+  g_object_class_install_property (gobject_class, PROP_SESSION_REUSED,
+    g_param_spec_boolean ("session-reused",
+                  _("Session Reused"),
+                  _("Indicates whether a session has been reused"),
+                  FALSE,
+                  G_PARAM_READABLE |
+                  G_PARAM_STATIC_STRINGS));
+
+  g_object_class_install_property (gobject_class, PROP_SESSION_RESUMPTION_ENABLED,
+    g_param_spec_boolean ("session-resumption-enabled",
+                  _("Session Reuse Enabled"),
+                  _("Controls whether session should reuse a previous session or if it should be stored. In tests, this variable is false by default."),
+                  !g_test_initialized (),
+                  G_PARAM_READABLE |
+                  G_PARAM_WRITABLE |
+                  G_PARAM_STATIC_STRINGS));
 
   /* For GTlsConnection and GDtlsConnection: */
   g_object_class_override_property (gobject_class, PROP_BASE_IO_STREAM, "base-io-stream");

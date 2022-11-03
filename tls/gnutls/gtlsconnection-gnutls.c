@@ -106,7 +106,13 @@ g_tls_connection_gnutls_set_handshake_priority (GTlsConnectionGnutls *gnutls)
   GTlsConnectionGnutlsPrivate *priv = g_tls_connection_gnutls_get_instance_private (gnutls);
   int ret;
 
-  g_assert (priority);
+  if (!priority)
+    {
+      /* initialize_gnutls_priority() previously failed and printed a warning,
+       * so no need for further warnings here.
+       */
+      return;
+    }
 
   ret = gnutls_priority_set (priv->session, priority);
   if (ret != GNUTLS_E_SUCCESS)
@@ -528,7 +534,7 @@ end_gnutls_io (GTlsConnectionGnutls  *gnutls,
   if (error && !*error)
     {
       *error = g_error_new (G_TLS_ERROR, G_TLS_ERROR_MISC, "%s: %s",
-                            err_prefix, gnutls_strerror (ret));
+                            gettext (err_prefix), gnutls_strerror (ret));
     }
 
   return G_TLS_CONNECTION_BASE_ERROR;
@@ -870,7 +876,7 @@ g_tls_connection_gnutls_handshake_thread_request_rehandshake (GTlsConnectionBase
 
   BEGIN_GNUTLS_IO (gnutls, G_IO_IN | G_IO_OUT, timeout, cancellable);
   ret = gnutls_rehandshake (priv->session);
-  END_GNUTLS_IO (gnutls, G_IO_IN | G_IO_OUT, ret, status, _("Error performing TLS handshake: %s"), error);
+  END_GNUTLS_IO (gnutls, G_IO_IN | G_IO_OUT, ret, status, N_("Error performing TLS handshake: %s"), error);
 
   return status;
 }
@@ -973,7 +979,7 @@ g_tls_connection_gnutls_handshake_thread_handshake (GTlsConnectionBase  *tls,
         }
     }
   END_GNUTLS_IO (gnutls, G_IO_IN | G_IO_OUT, ret, status,
-                 _("Error performing TLS handshake"), error);
+                 N_("Error performing TLS handshake"), error);
 
   return status;
 }
@@ -1063,7 +1069,7 @@ g_tls_connection_gnutls_verify_chain (GTlsConnectionBase       *tls,
   return errors;
 }
 
-static GTlsProtocolVersion
+GTlsProtocolVersion
 glib_protocol_version_from_gnutls (gnutls_protocol_t protocol_version)
 {
   switch (protocol_version)
@@ -1092,19 +1098,7 @@ glib_protocol_version_from_gnutls (gnutls_protocol_t protocol_version)
 static gchar *
 get_ciphersuite_name (gnutls_session_t session)
 {
-  gnutls_protocol_t protocol_version = gnutls_protocol_get_version (session);
-
-  if (protocol_version <= GNUTLS_TLS1_2 ||
-      (protocol_version >= GNUTLS_DTLS0_9 && protocol_version <= GNUTLS_DTLS1_2))
-    {
-      return g_strdup (gnutls_cipher_suite_get_name (gnutls_kx_get (session),
-                                                     gnutls_cipher_get (session),
-                                                     gnutls_mac_get (session)));
-    }
-
-  return g_strdup_printf ("TLS_%s_%s",
-                          gnutls_cipher_get_name (gnutls_cipher_get (session)),
-                          gnutls_digest_get_name (gnutls_prf_hash_get (session)));
+  return g_strdup (gnutls_ciphersuite_get (session));
 }
 
 static void
@@ -1154,6 +1148,16 @@ gnutls_get_binding (GTlsConnectionGnutls      *gnutls,
 
   if (ret == GNUTLS_E_SUCCESS)
     {
+      /* Older GnuTLS versions are known to return SUCCESS and empty data for TLSv1.3 tls-unique binding.
+       * While it may look prudent to catch here that specific corner case, the empty binding data is
+       * definitely not a SUCCESS, regardless of the version and type. */
+      if (cb.size == 0)
+        {
+          g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_GENERAL_ERROR,
+                       _("Empty channel binding data indicates a bug in the TLS library implementation"));
+          return FALSE;
+        }
+
       if (data != NULL)
         {
           g_tls_log_debug (gnutls, "binding size %d", cb.size);
@@ -1194,143 +1198,15 @@ gnutls_get_binding_tls_server_end_point (GTlsConnectionGnutls  *gnutls,
                                          GByteArray            *data,
                                          GError               **error)
 {
-#if GTLS_GNUTLS_CHECK_VERSION(3, 7, 2)
   return gnutls_get_binding (gnutls, data, GNUTLS_CB_TLS_SERVER_END_POINT, error);
-#else
-  GTlsConnectionGnutlsPrivate *priv = g_tls_connection_gnutls_get_instance_private (gnutls);
-  const gnutls_datum_t *ders;
-  unsigned int num_certs = 1;
-  int ret;
-  size_t rlen;
-  gnutls_x509_crt_t cert;
-  gnutls_digest_algorithm_t algo;
-  gboolean is_client = G_IS_TLS_CLIENT_CONNECTION (gnutls);
-
-  ret = gnutls_certificate_type_get (priv->session);
-  if (ret != GNUTLS_CRT_X509)
-    {
-      g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_SUPPORTED,
-                   _("X.509 certificate is not available on the connection"));
-      return FALSE;
-    }
-
-  if (is_client)
-    ders = gnutls_certificate_get_peers (priv->session, &num_certs);
-  else
-    ders = gnutls_certificate_get_ours (priv->session);
-
-  if (!ders || num_certs == 0)
-    {
-      g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_AVAILABLE,
-                   _("X.509 certificate is not available on the connection"));
-      return FALSE;
-    }
-
-  /* This is a drill */
-  if (!data)
-    return TRUE;
-
-  /* for DER only first cert is imported, but cert will be pre-initialized */
-  ret = gnutls_x509_crt_list_import (&cert, &num_certs, ders, GNUTLS_X509_FMT_DER, 0);
-  if (ret < 0 || num_certs == 0)
-    {
-      g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_AVAILABLE,
-                   _("X.509 certificate is not available or is of unknown format: %s"),
-                   gnutls_strerror (ret));
-      return FALSE;
-    }
-
-  /* obtain signature algorithm for the certificate - we need hashing algo from it */
-  ret = gnutls_x509_crt_get_signature_algorithm (cert);
-  if (ret < 0 || ret == GNUTLS_SIGN_UNKNOWN)
-    {
-      gnutls_x509_crt_deinit (cert);
-      g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_SUPPORTED,
-                   _("Unable to obtain certificate signature algorithm"));
-      return FALSE;
-    }
-  /* At this point we either use SHA256 as a fallback, or native algorithm */
-  algo = gnutls_sign_get_hash_algorithm (ret);
-  /* Cannot identify signing algorithm or weak security - let try fallback */
-  switch (algo)
-    {
-    case GNUTLS_DIG_MD5:
-    case GNUTLS_DIG_SHA1:
-      algo = GNUTLS_DIG_SHA256;
-      break;
-    case GNUTLS_DIG_UNKNOWN:
-    case GNUTLS_DIG_NULL:
-    case GNUTLS_DIG_MD5_SHA1:
-      g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_SUPPORTED,
-                   _("Current X.509 certificate uses unknown or unsupported signature algorithm"));
-      gnutls_x509_crt_deinit (cert);
-      return FALSE;
-    default:
-      /* no-op */
-      algo = algo;
-    }
-  /* preallocate 512 bits buffer as maximum supported digest size */
-  rlen = 64;
-  g_byte_array_set_size (data, rlen);
-  ret = gnutls_x509_crt_get_fingerprint (cert, algo, data->data, &rlen);
-
-  /* in case the future is coming on */
-  if (ret == GNUTLS_E_SHORT_MEMORY_BUFFER)
-    {
-      g_byte_array_set_size (data, rlen);
-      ret = gnutls_x509_crt_get_fingerprint (cert, algo, data->data, &rlen);
-    }
-
-  gnutls_x509_crt_deinit (cert);
-  g_byte_array_set_size (data, rlen);
-
-  if (ret == 0)
-    return TRUE;
-
-  /* Still getting error? We cannot do much here to recover */
-  g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_GENERAL_ERROR,
-               "%s", gnutls_strerror(ret));
-  return FALSE;
-#endif
 }
 
-#if !GTLS_GNUTLS_CHECK_VERSION(3, 7, 2)
-#define RFC5705_LABEL_DATA "EXPORTER-Channel-Binding"
-#define RFC5705_LABEL_LEN 24
-#endif
-
-/* Experimental binding for TLS1.3, see
- * https://datatracker.ietf.org/doc/draft-ietf-kitten-tls-channel-bindings-for-tls13 */
 static gboolean
 gnutls_get_binding_tls_exporter (GTlsConnectionGnutls  *gnutls,
                                  GByteArray            *data,
                                  GError               **error)
 {
-#if GTLS_GNUTLS_CHECK_VERSION(3, 7, 2)
   return gnutls_get_binding (gnutls, data, GNUTLS_CB_TLS_EXPORTER, error);
-#else
-  GTlsConnectionGnutlsPrivate *priv = g_tls_connection_gnutls_get_instance_private (gnutls);
-  int ret;
-  gsize ctx_len = 0;
-  char *context = "";
-
-  /* This is a drill */
-  if (!data)
-    return TRUE;
-
-  g_byte_array_set_size (data, 32);
-  ret = gnutls_prf_rfc5705 (priv->session,
-                            RFC5705_LABEL_LEN, RFC5705_LABEL_DATA,
-                            ctx_len, context,
-                            data->len, (char *)data->data);
-
-  if (ret == GNUTLS_E_SUCCESS)
-    return TRUE;
-
-  g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_GENERAL_ERROR,
-               "%s", gnutls_strerror (ret));
-  return FALSE;
-#endif
 }
 
 static gboolean
@@ -1341,18 +1217,14 @@ g_tls_connection_gnutls_get_channel_binding_data (GTlsConnectionBase      *tls,
 {
   GTlsConnectionGnutls *gnutls = G_TLS_CONNECTION_GNUTLS (tls);
 
-  /* XXX: remove the cast once public enum supports exporter */
-  switch ((int)type)
+  switch (type)
     {
     case G_TLS_CHANNEL_BINDING_TLS_UNIQUE:
       return gnutls_get_binding_tls_unique (gnutls, data, error);
-      /* fall through */
     case G_TLS_CHANNEL_BINDING_TLS_SERVER_END_POINT:
       return gnutls_get_binding_tls_server_end_point (gnutls, data, error);
-      /* fall through */
-    case 100500:
+    case G_TLS_CHANNEL_BINDING_TLS_EXPORTER:
       return gnutls_get_binding_tls_exporter (gnutls, data, error);
-      /* fall through */
     default:
       /* Anyone to implement tls-unique-for-telnet? */
       g_set_error (error, G_TLS_CHANNEL_BINDING_ERROR, G_TLS_CHANNEL_BINDING_ERROR_NOT_IMPLEMENTED,
@@ -1377,7 +1249,7 @@ g_tls_connection_gnutls_read (GTlsConnectionBase  *tls,
 
   BEGIN_GNUTLS_IO (gnutls, G_IO_IN, timeout, cancellable);
   ret = gnutls_record_recv (priv->session, buffer, count);
-  END_GNUTLS_IO (gnutls, G_IO_IN, ret, status, _("Error reading data from TLS socket"), error);
+  END_GNUTLS_IO (gnutls, G_IO_IN, ret, status, N_("Error reading data from TLS socket"), error);
 
   *nread = MAX (ret, 0);
   return status;
@@ -1437,7 +1309,7 @@ g_tls_connection_gnutls_read_message (GTlsConnectionBase  *tls,
       gnutls_packet_deinit (packet);
     }
 
-  END_GNUTLS_IO (gnutls, G_IO_IN, ret, status, _("Error reading data from TLS socket"), error);
+  END_GNUTLS_IO (gnutls, G_IO_IN, ret, status, N_("Error reading data from TLS socket"), error);
 
   *nread = MAX (ret, 0);
   return status;
@@ -1459,7 +1331,7 @@ g_tls_connection_gnutls_write (GTlsConnectionBase  *tls,
 
   BEGIN_GNUTLS_IO (gnutls, G_IO_OUT, timeout, cancellable);
   ret = gnutls_record_send (priv->session, buffer, count);
-  END_GNUTLS_IO (gnutls, G_IO_OUT, ret, status, _("Error writing data to TLS socket"), error);
+  END_GNUTLS_IO (gnutls, G_IO_OUT, ret, status, N_("Error writing data to TLS socket"), error);
 
   *nwrote = MAX (ret, 0);
   return status;
@@ -1522,7 +1394,7 @@ g_tls_connection_gnutls_write_message (GTlsConnectionBase  *tls,
 
   BEGIN_GNUTLS_IO (gnutls, G_IO_OUT, timeout, cancellable);
   ret = gnutls_record_uncork (priv->session, 0  /* flags */);
-  END_GNUTLS_IO (gnutls, G_IO_OUT, ret, status, _("Error writing data to TLS socket"), error);
+  END_GNUTLS_IO (gnutls, G_IO_OUT, ret, status, N_("Error writing data to TLS socket"), error);
 
   *nwrote = MAX (ret, 0);
   return status;
@@ -1541,7 +1413,7 @@ g_tls_connection_gnutls_close (GTlsConnectionBase  *tls,
 
   BEGIN_GNUTLS_IO (gnutls, G_IO_IN | G_IO_OUT, timeout, cancellable);
   ret = gnutls_bye (priv->session, GNUTLS_SHUT_WR);
-  END_GNUTLS_IO (gnutls, G_IO_IN | G_IO_OUT, ret, status, _("Error performing TLS close: %s"), error);
+  END_GNUTLS_IO (gnutls, G_IO_IN | G_IO_OUT, ret, status, N_("Error performing TLS close: %s"), error);
 
   return status;
 }

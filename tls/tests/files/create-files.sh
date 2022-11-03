@@ -88,18 +88,26 @@ openssl pkcs8 -topk8 -in server-key.pem -outform PEM -nocrypt -out server-key-pk
 openssl pkcs8 -topk8 -in server-key.pem -outform DER -nocrypt -out server-key-pkcs8.der
 
 #######################################################################
-### Server (OCSP Missing)
+### Server (OCSP required by CA)
 #######################################################################
 
-msg "Creating server (OCSP Missing) certificate request"
-openssl req -config ssl/server.conf -key server-key.pem -new -out server-ocsp-missing-csr.pem
+msg "Creating server (OCSP required by CA) certificate"
+openssl x509 -req -in server-csr.pem -days 9125 -CA ca-ocsp.pem -CAkey ca-key.pem -CAserial serial -extfile ssl/server.conf -extensions v3_req_ext -out server-ocsp-required-by-ca.pem
 
-msg "Creating server (OCSP Missing) certificate"
-openssl x509 -req -in server-ocsp-missing-csr.pem -days 9125 -CA ca-ocsp.pem -CAkey ca-key.pem -CAserial serial -extfile ssl/server.conf -extensions v3_req_ext -out server-ocsp-missing.pem
+msg "Concatenating server (OCSP required by CA) certificate and private key into a single file"
+cat server-ocsp-required-by-ca.pem > server-ocsp-required-by-ca-and-key.pem
+cat server-key.pem >> server-ocsp-required-by-ca-and-key.pem
 
-msg "Concatenating server (OCSP Missing) certificate and private key into a single file"
-cat server-ocsp-missing.pem > server-ocsp-missing-and-key.pem
-cat server-key.pem >> server-ocsp-missing-and-key.pem
+#######################################################################
+### Server (OCSP required by server)
+#######################################################################
+
+msg "Creating server (OCSP required by server) certificate"
+openssl x509 -req -in server-csr.pem -days 9125 -CA ca.pem -CAkey ca-key.pem -CAserial serial -extfile ssl/server-muststaple.conf -extensions v3_req_ext -out server-ocsp-required-by-server.pem
+
+msg "Concatenating server (OCSP required by server) certificate and private key into a single file"
+cat server-ocsp-required-by-server.pem > server-ocsp-required-by-server-and-key.pem
+cat server-key.pem >> server-ocsp-required-by-server-and-key.pem
 
 #######################################################################
 ### Server (self-signed)
@@ -124,6 +132,10 @@ openssl x509 -req -in client-csr.pem -days 9125 -CA ca.pem -CAkey ca-key.pem -CA
 msg "Concatenating client certificate and private key into a single file"
 cat client.pem > client-and-key.pem
 cat client-key.pem >> client-and-key.pem
+
+msg "Concatenating the full client chain into a single file"
+cat ca.pem > client-and-key-fullchain.pem
+cat client-and-key.pem >> client-and-key-fullchain.pem
 
 # It is not possible to specify the start and end date using the "x509" tool.
 # It would be better to use the "ca" tool. Sorry!
@@ -211,6 +223,18 @@ msg "Updating CA Root files"
 msg "Updating test expectations"
 ./update-test-database.py ca.pem ../file-database.h
 ./update-certificate-test.py server.pem ../certificate.h
+
+#######################################################################
+### Generate PKCS #12 format copies for testing
+#######################################################################
+
+msg "Generating PKCS #12 files"
+# Not encrypted p12 file
+openssl pkcs12 -in client-and-key.pem -export -keypbe NONE -certpbe NONE -nomaciter -out client-and-key.p12 -passout 'pass:' -name "No password"
+# Encrypted key only
+openssl pkcs12 -in client-and-key.pem -export -certpbe NONE -nomaciter -out client-and-key-password.p12 -passout 'pass:1234' -name "With Password"
+# Encrypted p12 file
+openssl pkcs12 -in client-and-key.pem -export -out client-and-key-password-enckey.p12 -passout 'pass:1234' -name "With Password and encrypted privkey"
 
 #######################################################################
 ### Cleanup
