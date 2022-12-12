@@ -12,4 +12,6 @@ if backends.contains('openssl')
   subdir('openssl')
 endif
 
-subdir('tests')
+if get_option('tests')
+  subdir('tests')
+endif
