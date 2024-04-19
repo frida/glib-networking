@@ -1649,7 +1649,7 @@ sync_handshake_thread_completed (GObject      *object,
 {
   GTlsConnectionBase *tls = G_TLS_CONNECTION_BASE (object);
   GTlsConnectionBasePrivate *priv = g_tls_connection_base_get_instance_private (tls);
-  gpointer source_tag;
+  G_GNUC_UNUSED gpointer source_tag;
 
   g_tls_log_debug (tls, "synchronous TLS handshake thread completed");
 
