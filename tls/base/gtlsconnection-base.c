@@ -2875,7 +2875,8 @@ g_tls_connection_base_constructed (GObject *object)
             }
           g_object_unref (remote_addr);
         }
-      g_object_unref (base_conn);
+      if (base_conn)
+        g_object_unref (base_conn);
     }
 
   if (G_OBJECT_CLASS (g_tls_connection_base_parent_class)->constructed)
