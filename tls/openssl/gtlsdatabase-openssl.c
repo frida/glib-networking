@@ -236,7 +236,7 @@ add_certs_from_store (const gunichar2 *source_cert_store_name,
   if (store_handle == NULL)
     return FALSE;
 
-  while (cert_context = CertEnumCertificatesInStore (store_handle, cert_context))
+  while ((cert_context = CertEnumCertificatesInStore (store_handle, cert_context)))
     {
       X509 *x;
       const unsigned char *pdata;
