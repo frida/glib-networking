@@ -61,7 +61,10 @@ if build_static
   install_data(['gioopenssl.vapi'],
     install_dir: join_paths(get_option('datadir'), 'vala', 'vapi'))
 
-  gioopenssl_dep = declare_dependency(link_with: gioopenssl_lib)
+  gioopenssl_dep = declare_dependency(
+    include_directories: include_directories('.'),
+    link_with: gioopenssl_lib,
+  )
   meson.override_dependency('gioopenssl', gioopenssl_dep)
 endif
 
