@@ -132,7 +132,7 @@ end_openssl_io (GTlsConnectionOpenssl  *openssl,
       return G_TLS_CONNECTION_BASE_TRY_AGAIN;
     }
 
-  if (err_code == SSL_ERROR_ZERO_RETURN)
+  if (err_code == SSL_ERROR_ZERO_RETURN && direction == G_IO_IN)
     return G_TLS_CONNECTION_BASE_OK;
 
   if (status == G_TLS_CONNECTION_BASE_OK ||
