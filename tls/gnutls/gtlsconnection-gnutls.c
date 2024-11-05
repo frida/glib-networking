@@ -882,13 +882,17 @@ g_tls_connection_gnutls_handshake_thread_request_rehandshake (GTlsConnectionBase
 }
 
 static GTlsCertificate *
-g_tls_connection_gnutls_retrieve_peer_certificate (GTlsConnectionBase *tls)
+g_tls_connection_gnutls_retrieve_peer_certificate (GTlsConnectionBase *tls,
+                                                   gboolean           *using_psk)
 {
   GTlsConnectionGnutls *gnutls = G_TLS_CONNECTION_GNUTLS (tls);
   GTlsConnectionGnutlsPrivate *priv = g_tls_connection_gnutls_get_instance_private (gnutls);
   const gnutls_datum_t *certs;
   GTlsCertificateGnutls *chain;
   unsigned int num_certs;
+
+  if (using_psk)
+    *using_psk = FALSE;
 
   if (gnutls_certificate_type_get (priv->session) != GNUTLS_CRT_X509)
     return NULL;

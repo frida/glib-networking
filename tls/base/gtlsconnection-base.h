@@ -71,7 +71,8 @@ struct _GTlsConnectionBaseClass
                                                              gint64                timeout,
                                                              GCancellable         *cancellable,
                                                              GError              **error);
-  GTlsCertificate            *(*retrieve_peer_certificate)  (GTlsConnectionBase   *tls);
+  GTlsCertificate            *(*retrieve_peer_certificate)  (GTlsConnectionBase   *tls,
+                                                             gboolean             *using_psk);
   GTlsCertificateFlags        (*verify_chain)               (GTlsConnectionBase       *tls,
                                                              GTlsCertificate          *chain,
                                                              const gchar              *purpose,
