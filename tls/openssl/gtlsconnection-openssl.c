@@ -569,7 +569,8 @@ g_tls_connection_openssl_complete_handshake (GTlsConnectionBase   *tls,
 }
 
 static GTlsCertificate *
-g_tls_connection_openssl_retrieve_peer_certificate (GTlsConnectionBase *tls)
+g_tls_connection_openssl_retrieve_peer_certificate (GTlsConnectionBase *tls,
+                                                    gboolean           *using_psk)
 {
   X509 *peer;
   STACK_OF (X509) *certs;
@@ -577,6 +578,9 @@ g_tls_connection_openssl_retrieve_peer_certificate (GTlsConnectionBase *tls)
   SSL *ssl;
 
   ssl = g_tls_connection_openssl_get_ssl (G_TLS_CONNECTION_OPENSSL (tls));
+
+  if (using_psk)
+    *using_psk = SSL_get_psk_identity (ssl) != NULL;
 
   peer = SSL_get_peer_certificate (ssl);
   if (!peer)

@@ -1374,6 +1374,7 @@ accept_or_reject_peer_certificate (gpointer user_data)
   GTlsConnectionBase *tls = user_data;
   GTlsConnectionBasePrivate *priv = g_tls_connection_base_get_instance_private (tls);
   GTlsCertificate *peer_certificate = NULL;
+  gboolean using_psk;
   GTlsCertificateFlags peer_certificate_errors = 0;
   gboolean accepted = FALSE;
 
@@ -1384,7 +1385,7 @@ accept_or_reject_peer_certificate (gpointer user_data)
   g_assert (priv->handshake_context);
   g_assert (g_main_context_is_owner (priv->handshake_context));
 
-  peer_certificate = G_TLS_CONNECTION_BASE_GET_CLASS (tls)->retrieve_peer_certificate (tls);
+  peer_certificate = G_TLS_CONNECTION_BASE_GET_CLASS (tls)->retrieve_peer_certificate (tls, &using_psk);
 
   if (peer_certificate)
     {
@@ -1423,6 +1424,10 @@ accept_or_reject_peer_certificate (gpointer user_data)
           if (sync_handshake_in_progress)
             g_main_context_push_thread_default (priv->handshake_context);
         }
+    }
+  else if (using_psk)
+    {
+      accepted = TRUE;
     }
   else if (G_IS_TLS_SERVER_CONNECTION (tls))
     {
@@ -1696,7 +1701,7 @@ finish_handshake (GTlsConnectionBase  *tls,
           g_mutex_lock (&priv->verify_certificate_mutex);
 
           g_clear_object (&priv->peer_certificate);
-          priv->peer_certificate = G_TLS_CONNECTION_BASE_GET_CLASS (tls)->retrieve_peer_certificate (tls);
+          priv->peer_certificate = G_TLS_CONNECTION_BASE_GET_CLASS (tls)->retrieve_peer_certificate (tls, NULL);
           priv->peer_certificate_errors = verify_peer_certificate (tls, priv->peer_certificate);
 
           g_object_notify (G_OBJECT (tls), "peer-certificate");
