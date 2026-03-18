@@ -71,7 +71,7 @@ foreach backend: backends
       '-D_GNU_SOURCE',
     ]
 
-    if not ['windows', 'qnx'].contains(host_system)
+    if not ['windows'].contains(host_system)
       program_deps += cc.find_library('dl')
     endif
 
@@ -115,9 +115,7 @@ if enable_installed_tests
     'files/ca.pem',
     'files/ca-roots-bad.pem',
     'files/ca-roots.pem',
-    'files/ca-verisign-sha1.pem',
     'files/chain.pem',
-    'files/chain-with-verisign-md2.pem',
     'files/client2-and-key.pem',
     'files/client2-key.pem',
     'files/client2.pem',

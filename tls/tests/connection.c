@@ -88,7 +88,6 @@ typedef struct {
   GSocketConnectable *identity;
   GSocketAddress *address;
   GTlsAuthenticationMode auth_mode;
-  gboolean rehandshake;
   GTlsCertificateFlags accept_flags;
   GError *read_error;
   GError *server_error;
@@ -260,25 +259,6 @@ static void on_output_write_finish (GObject        *object,
                                     gpointer        user_data);
 
 static void
-on_rehandshake_finish (GObject        *object,
-                       GAsyncResult   *res,
-                       gpointer        user_data)
-{
-  TestConnection *test = user_data;
-  GError *error = NULL;
-  GOutputStream *stream;
-
-  g_tls_connection_handshake_finish (G_TLS_CONNECTION (object), res, &error);
-  g_assert_no_error (error);
-
-  stream = g_io_stream_get_output_stream (test->server_connection);
-  g_output_stream_write_async (stream, TEST_DATA + TEST_DATA_LENGTH / 2,
-                               TEST_DATA_LENGTH / 2,
-                               G_PRIORITY_DEFAULT, NULL,
-                               on_output_write_finish, test);
-}
-
-static void
 on_server_close_finish (GObject        *object,
                         GAsyncResult   *res,
                         gpointer        user_data)
@@ -289,6 +269,7 @@ on_server_close_finish (GObject        *object,
   g_io_stream_close_finish (G_IO_STREAM (object), res, &error);
   // FIXME: https://gitlab.gnome.org/GNOME/glib-networking/issues/105
   // g_assert_no_error (error);
+  g_clear_error (&error);
 
   test->server_running = FALSE;
 }
@@ -309,15 +290,6 @@ on_output_write_finish (GObject        *object,
 
   g_assert_no_error (test->server_error);
   g_output_stream_write_finish (G_OUTPUT_STREAM (object), res, &test->server_error);
-
-  if (!test->server_error && test->rehandshake)
-    {
-      test->rehandshake = FALSE;
-      g_tls_connection_handshake_async (G_TLS_CONNECTION (test->server_connection),
-                                        G_PRIORITY_DEFAULT, NULL,
-                                        on_rehandshake_finish, test);
-      return;
-    }
 
   if (test->connection_received_strategy == WRITE_THEN_CLOSE)
     close_server_connection (test);
@@ -379,8 +351,7 @@ on_incoming_connection (GSocketService     *service,
   if (test->connection_received_strategy == WRITE_THEN_CLOSE ||
       test->connection_received_strategy == WRITE_THEN_WAIT)
     {
-      g_output_stream_write_async (stream, TEST_DATA,
-                                   test->rehandshake ? TEST_DATA_LENGTH / 2 : TEST_DATA_LENGTH,
+      g_output_stream_write_async (stream, TEST_DATA, TEST_DATA_LENGTH,
                                    G_PRIORITY_DEFAULT, NULL,
                                    on_output_write_finish, test);
     }
@@ -467,6 +438,10 @@ run_echo_server (GThreadedSocketService *service,
   while (TRUE)
     {
       nread = g_input_stream_read (istream, buf, sizeof (buf), NULL, &error);
+
+      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
+        continue;
+
       g_assert_no_error (error);
       g_assert_cmpint (nread, >=, 0);
 
@@ -476,13 +451,10 @@ run_echo_server (GThreadedSocketService *service,
       for (total = 0; total < nread; total += nwrote)
         {
           nwrote = g_output_stream_write (ostream, buf + total, nread - total, NULL, &error);
-          g_assert_no_error (error);
-        }
 
-      if (test->rehandshake)
-        {
-          test->rehandshake = FALSE;
-          g_tls_connection_handshake (tlsconn, NULL, &error);
+          if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
+            continue;
+
           g_assert_no_error (error);
         }
     }
@@ -535,6 +507,8 @@ on_client_connection_close_finish (GObject        *object,
    */
   if (!test->ignore_client_close_error)
     g_assert_no_error (error);
+  else
+    g_clear_error (&error);
 
   g_main_loop_quit (test->loop);
 }
@@ -588,7 +562,11 @@ clock_gettime (clockid_t        clk_id,
   int ret = -1;
   if (!original_clock_gettime)
     {
+#if (_TIME_BITS == 64)
+      original_clock_gettime = dlsym (RTLD_NEXT, "__clock_gettime64");
+#else
       original_clock_gettime = dlsym (RTLD_NEXT, "clock_gettime");
+#endif
       if (!original_clock_gettime)
         {
           errno = EINVAL;
@@ -1232,10 +1210,6 @@ test_invalid_chain_with_alternative_ca_cert (TestConnection *test,
 
   g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
 
-  /* Make sure this test doesn't expire. */
-  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
-                                                G_TLS_CERTIFICATE_VALIDATE_ALL & ~G_TLS_CERTIFICATE_EXPIRED);
-
   read_test_data_async (test);
   g_main_loop_run (test->loop);
   wait_until_server_finished (test);
@@ -1471,14 +1445,6 @@ test_client_auth_pkcs11_connection (TestConnection *test,
 }
 
 static void
-test_client_auth_rehandshake (TestConnection *test,
-                              gconstpointer   data)
-{
-  test->rehandshake = TRUE;
-  test_client_auth_connection (test, data);
-}
-
-static void
 test_client_auth_failure (TestConnection *test,
                           gconstpointer   data)
 {
@@ -1637,6 +1603,8 @@ test_client_auth_fail_missing_client_private_key (TestConnection *test,
 #else
   g_assert_error (test->server_error, G_TLS_ERROR, G_TLS_ERROR_NOT_TLS);
 #endif
+
+  g_object_unref (cert);
 }
 
 static void
@@ -2184,14 +2152,6 @@ test_simultaneous_async (TestConnection *test,
   g_assert_cmpstr (test->buf, ==, TEST_DATA);
 }
 
-static void
-test_simultaneous_async_rehandshake (TestConnection *test,
-                                     gconstpointer   data)
-{
-  test->rehandshake = TRUE;
-  test_simultaneous_async (test, data);
-}
-
 static gpointer
 simul_read_thread (gpointer user_data)
 {
@@ -2206,6 +2166,10 @@ simul_read_thread (gpointer user_data)
                                    test->buf + test->nread,
                                    MIN (TEST_DATA_LENGTH / 2, TEST_DATA_LENGTH - test->nread),
                                    NULL, &error);
+
+      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
+        continue;
+
       g_assert_no_error (error);
 
       test->nread += nread;
@@ -2228,6 +2192,10 @@ simul_write_thread (gpointer user_data)
                                       &TEST_DATA[test->nwrote],
                                       MIN (TEST_DATA_LENGTH / 2, TEST_DATA_LENGTH - test->nwrote),
                                       NULL, &error);
+
+      if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
+        continue;
+
       g_assert_no_error (error);
 
       test->nwrote += nwrote;
@@ -2276,14 +2244,6 @@ test_simultaneous_sync (TestConnection *test,
 
   g_io_stream_close (test->client_connection, NULL, &error);
   g_assert_no_error (error);
-}
-
-static void
-test_simultaneous_sync_rehandshake (TestConnection *test,
-                                    gconstpointer   data)
-{
-  test->rehandshake = TRUE;
-  test_simultaneous_sync (test, data);
 }
 
 static void
@@ -2399,7 +2359,7 @@ test_unclean_close_by_server (TestConnection *test,
   nread = g_input_stream_read (g_io_stream_get_input_stream (test->client_connection),
                                test->buf, TEST_DATA_LENGTH,
                                NULL, &test->read_error);
-  if (!g_error_matches (test->read_error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE))
+  if (!g_error_matches (test->read_error, G_IO_ERROR, G_IO_ERROR_BROKEN_PIPE) && !g_error_matches (test->read_error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK))
     g_assert_no_error (test->read_error);
   g_assert_cmpint (nread, ==, 0);
 
@@ -3255,113 +3215,16 @@ test_tls_info (TestConnection *test,
   g_free (ciphersuite_name);
 }
 
-static void
-test_connection_oscp_must_staple (TestConnection *test,
-                                  gconstpointer   data)
-{
-  GSocketClient *client;
-  GIOStream *connection;
-  GError *error = NULL;
-
-  test->database = g_tls_file_database_new (tls_test_file_path ("ca.pem"), &error);
-  g_assert_no_error (error);
-  g_assert_nonnull (test->database);
-
-  test->server_certificate = g_tls_certificate_new_from_file (tls_test_file_path ("server-ocsp-required-by-server-and-key.pem"), &error);
-  g_assert_no_error (error);
-  start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, WRITE_THEN_WAIT);
-
-  client = g_socket_client_new ();
-  connection = G_IO_STREAM (g_socket_client_connect (client, G_SOCKET_CONNECTABLE (test->address),
-                                                     NULL, &error));
-  g_assert_no_error (error);
-  g_object_unref (client);
-
-  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
-  g_assert_no_error (error);
-  g_assert_nonnull (test->client_connection);
-  g_object_unref (connection);
-
-  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
-
-  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
-                                                G_TLS_CERTIFICATE_VALIDATE_ALL);
-
-  read_test_data_async (test);
-  g_main_loop_run (test->loop);
-
-  close_server_connection (test);
-  wait_until_server_finished (test);
-
-  /* The server certificate states it supports status_request but our server does not
-   * actually set or support that.
-   * To be secure this must error as a bad certificate. */
-  g_assert_error (test->read_error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE);
-
-  g_clear_error (&test->read_error);
-  g_clear_error (&test->server_error);
-}
-
-static void
-test_connection_oscp_must_staple_intermediate_certificate (TestConnection *test,
-                                                           gconstpointer   data)
-{
-  GSocketClient *client;
-  GIOStream *connection;
-  GError *error = NULL;
-
-#ifdef BACKEND_IS_OPENSSL
-  g_test_skip ("OCSP Must-Staple on intermediate certificates is not supported with the OpenSSL backend");
-  return;
-#endif
-
-  test->database = g_tls_file_database_new (tls_test_file_path ("ca-ocsp.pem"), &error);
-  g_assert_no_error (error);
-  g_assert_nonnull (test->database);
-
-  test->server_certificate = g_tls_certificate_new_from_file (tls_test_file_path ("server-ocsp-required-by-ca-and-key.pem"), &error);
-  g_assert_no_error (error);
-  start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, WRITE_THEN_WAIT);
-
-  client = g_socket_client_new ();
-  connection = G_IO_STREAM (g_socket_client_connect (client, G_SOCKET_CONNECTABLE (test->address),
-                                                     NULL, &error));
-  g_assert_no_error (error);
-  g_object_unref (client);
-
-  test->client_connection = g_tls_client_connection_new (connection, test->identity, &error);
-  g_assert_no_error (error);
-  g_assert_nonnull (test->client_connection);
-  g_object_unref (connection);
-
-  g_tls_connection_set_database (G_TLS_CONNECTION (test->client_connection), test->database);
-
-  g_tls_client_connection_set_validation_flags (G_TLS_CLIENT_CONNECTION (test->client_connection),
-                                                G_TLS_CERTIFICATE_VALIDATE_ALL);
-
-  read_test_data_async (test);
-  g_main_loop_run (test->loop);
-
-  close_server_connection (test);
-  wait_until_server_finished (test);
-
-  /* The CA certificate states it supports status_request but our server does not
-   * actually set or support that.
-   * To be secure this must error as a bad certificate. */
-  g_assert_error (test->read_error, G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE);
-
-  g_clear_error (&test->read_error);
-  g_clear_error (&test->server_error);
-}
-
 int
 main (int   argc,
       char *argv[])
 {
   int ret;
-#ifdef BACKEND_IS_GNUTLS
+#if defined(BACKEND_IS_GNUTLS) && HAVE_GNUTLS_PKCS11
   char *module_path;
+#ifndef __SANITIZE_ADDRESS__
   const char *spy_path;
+#endif
 #endif
 
   g_test_init (&argc, &argv, NULL);
@@ -3372,11 +3235,17 @@ main (int   argc,
 
   g_assert_true (g_ascii_strcasecmp (G_OBJECT_TYPE_NAME (g_tls_backend_get_default ()), "GTlsBackend" BACKEND) == 0);
 
-#ifdef BACKEND_IS_GNUTLS
+#if defined(BACKEND_IS_GNUTLS) && HAVE_GNUTLS_PKCS11
   module_path = g_test_build_filename (G_TEST_BUILT, "mock-pkcs11.so", NULL);
   g_assert_true (g_file_test (module_path, G_FILE_TEST_EXISTS));
 
-  /* This just adds extra logging which is useful for debugging */
+#ifndef __SANITIZE_ADDRESS__
+  /* Since OpenSC 0.27, pkcs11-spy uses RTLD_DEEPBIND and so cannot be used with
+   * asan.
+   *
+   * https://github.com/google/sanitizers/issues/611
+   * https://github.com/OpenSC/OpenSC/pull/3487
+   */
   spy_path = g_getenv ("PKCS11SPY_PATH");
   if (!spy_path)
     {
@@ -3392,6 +3261,7 @@ main (int   argc,
       g_free (module_path);
       module_path = g_strdup (spy_path);
     }
+#endif
 
   ret = gnutls_pkcs11_init (GNUTLS_PKCS11_FLAG_MANUAL, NULL);
   g_assert_cmpint (ret, ==, GNUTLS_E_SUCCESS);
@@ -3422,8 +3292,6 @@ main (int   argc,
               setup_connection, test_invalid_chain_with_alternative_ca_cert, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/client-auth", TestConnection, NULL,
               setup_connection, test_client_auth_connection, teardown_connection);
-  g_test_add ("/tls/" BACKEND "/connection/client-auth-rehandshake", TestConnection, NULL,
-              setup_connection, test_client_auth_rehandshake, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/client-auth-failure", TestConnection, NULL,
               setup_connection, test_client_auth_failure, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/client-auth-fail-missing-client-private-key", TestConnection, NULL,
@@ -3434,8 +3302,10 @@ main (int   argc,
               setup_connection, test_client_auth_request_fail, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/client-auth-request-none", TestConnection, NULL,
               setup_connection, test_client_auth_request_none, teardown_connection);
+#if HAVE_GNUTLS_PKCS11
   g_test_add ("/tls/" BACKEND "/connection/client-auth-pkcs11", TestConnection, NULL,
               setup_connection, test_client_auth_pkcs11_connection, teardown_connection);
+#endif
   g_test_add ("/tls/" BACKEND "/connection/no-database", TestConnection, NULL,
               setup_connection, test_connection_no_database, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/failed", TestConnection, NULL,
@@ -3450,10 +3320,6 @@ main (int   argc,
               setup_connection, test_simultaneous_async, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/simultaneous-sync", TestConnection, NULL,
               setup_connection, test_simultaneous_sync, teardown_connection);
-  g_test_add ("/tls/" BACKEND "/connection/simultaneous-async-rehandshake", TestConnection, NULL,
-              setup_connection, test_simultaneous_async_rehandshake, teardown_connection);
-  g_test_add ("/tls/" BACKEND "/connection/simultaneous-sync-rehandshake", TestConnection, NULL,
-              setup_connection, test_simultaneous_sync_rehandshake, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/close-immediately", TestConnection, NULL,
               setup_connection, test_close_immediately, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/unclean-close-by-server", TestConnection, NULL,
@@ -3490,10 +3356,6 @@ main (int   argc,
               setup_connection, test_connection_binding_match_tls_exporter, teardown_connection);
   g_test_add ("/tls/" BACKEND "/connection/tls-info", TestConnection, NULL,
               setup_connection, test_tls_info, teardown_connection);
-  g_test_add ("/tls/" BACKEND "/connection/oscp/must-staple", TestConnection, NULL,
-              setup_connection, test_connection_oscp_must_staple, teardown_connection);
-  g_test_add ("/tls/" BACKEND "/connection/oscp/must-staple-intermediate-certificate", TestConnection, NULL,
-              setup_connection, test_connection_oscp_must_staple_intermediate_certificate, teardown_connection);
 
   ret = g_test_run ();
 

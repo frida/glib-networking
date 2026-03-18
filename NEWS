@@ -1,3 +1,71 @@
+2.80.1 - January 8, 2025
+========================
+
+ - OpenSSL: fix crash in complete_handshake (!251, Dario Saccavino)
+ - OpenSSL: fix invalid free in openssl_get_binding_tls_server_end_point() (!255)
+ - TLS test should handle G_IO_ERROR_WOULD_BLOCK (!253, Richard Purdie and Alexander Kanavin)
+ - Updated translations
+
+2.80.0 - March 14, 2024
+=======================
+
+- Mark plugin functions as exports on Windows (!250, Amyspark)
+- Updated translations
+
+2.80.rc - February 29, 2024
+===========================
+
+- GnuTLS: fix improper use of IP address in SNI extension (!247, MARTINSONS Frederic)
+- GnuTLS: major performance improvement: reduce unnecessary trust list creation (!249)
+- OpenSSL: properly handle BIO_CTRL_EOF (!248)
+- Updated translations
+
+2.80.alpha - January 5, 2024
+============================
+
+- GnuTLS: Add warning when system has no trusted certificates (!243)
+- OpenSSL: Fix bug when populating trust store (!244, Alessandro Bono)
+- Fix license on dtls-connection.c test (!245, David King)
+- Updated translations
+
+2.78.0 - September 14, 2023
+===========================
+
+- Respect root certificates added to macOS system keychain by users (#213, Leo Zi-You Assini)
+- Disable PKCS #11 tests when GnuTLS is built without PKCS #11 support (!240, Ross Burton)
+- Fix connection tests on 32-bit systems with 64-bit time_t (!241, Alexander Kanavin)
+- Updated translations
+
+2.76.1 - June 29, 2023
+======================
+
+- Fix proxy tests when built against libproxy 0.5 (#212, Jan-Michael Brummer)
+- Updated translations
+
+2.76.0 - March 17, 2023
+=======================
+
+- Fix OpenSSL sessions becoming unresumable (#207, Goncalo Gomes)
+- Fix installed libproxy test (#208, Simon McVittie)
+
+2.76.beta - February 9, 2023
+============================
+
+- Hopefully fix environment proxy resolver on Windows (!226)
+- Remove static_modules build option, use -Ddefault_library=static instead (!233)
+- Updated translations
+
+2.76.alpha - January 5, 2023
+============================
+
+- OpenSSL: add session resumption support (#147, Goncalo Gomes)
+- GnuTLS: several session resumption improvements (#194, Goncalo Gomes)
+- Skip TLS exporter test for TLS 1.2 (#201, Natanael Copa)
+- Default values for build options have changed, no longer use auto (!220)
+- Fix static linking on Windows (!223, Xavier Claessens)
+- Don't use system trust on iOS (!230, Nirbheek Chauhan)
+- Updated translations
+
 2.74.0 - September 15, 2022
 ===========================
 

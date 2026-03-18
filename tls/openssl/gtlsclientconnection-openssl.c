@@ -71,13 +71,13 @@ static void g_tls_client_connection_openssl_client_connection_interface_init (GT
 
 static GInitableIface *g_tls_client_connection_openssl_parent_initable_iface;
 
-G_DEFINE_TYPE_WITH_CODE (GTlsClientConnectionOpenssl, g_tls_client_connection_openssl, G_TYPE_TLS_CONNECTION_OPENSSL,
-                         G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
-                                                g_tls_client_connection_openssl_initable_interface_init)
-                         G_IMPLEMENT_INTERFACE (G_TYPE_TLS_CLIENT_CONNECTION,
-                                                g_tls_client_connection_openssl_client_connection_interface_init)
-                         G_IMPLEMENT_INTERFACE (G_TYPE_DTLS_CLIENT_CONNECTION,
-                                                NULL));
+G_DEFINE_FINAL_TYPE_WITH_CODE (GTlsClientConnectionOpenssl, g_tls_client_connection_openssl, G_TYPE_TLS_CONNECTION_OPENSSL,
+                               G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
+                                                      g_tls_client_connection_openssl_initable_interface_init)
+                               G_IMPLEMENT_INTERFACE (G_TYPE_TLS_CLIENT_CONNECTION,
+                                                      g_tls_client_connection_openssl_client_connection_interface_init)
+                               G_IMPLEMENT_INTERFACE (G_TYPE_DTLS_CLIENT_CONNECTION,
+                                                      NULL));
 
 static void
 g_tls_client_connection_openssl_finalize (GObject *object)
@@ -141,9 +141,11 @@ g_tls_client_connection_openssl_get_property (GObject    *object,
               if (size > 0)
                 {
                   unsigned char *ca;
+                  unsigned char *tmp;
 
                   ca = g_malloc (size);
-                  size = i2d_X509_NAME (sk_X509_NAME_value (openssl->ca_list, i), &ca);
+                  tmp = ca;
+                  size = i2d_X509_NAME (sk_X509_NAME_value (openssl->ca_list, i), &tmp);
                   if (size > 0)
                     accepted_cas = g_list_prepend (accepted_cas, g_byte_array_new_take (
                                                    ca, size));
@@ -227,53 +229,6 @@ g_tls_client_connection_openssl_complete_handshake (GTlsConnectionBase   *tls,
   g_object_notify (G_OBJECT (client), "accepted-cas");
 }
 
-static GTlsCertificateFlags
-verify_ocsp_response (GTlsClientConnectionOpenssl *openssl,
-                      GTlsCertificate             *peer_certificate)
-{
-  SSL *ssl = NULL;
-  OCSP_RESPONSE *resp = NULL;
-  GTlsDatabase *database;
-  long len = 0;
-  unsigned char *p = NULL;
-
-  ssl = g_tls_connection_openssl_get_ssl (G_TLS_CONNECTION_OPENSSL (openssl));
-  len = SSL_get_tlsext_status_ocsp_resp (ssl, &p);
-  if (p)
-    {
-      resp = d2i_OCSP_RESPONSE (NULL, (const unsigned char **)&p, len);
-      if (!resp)
-        return G_TLS_CERTIFICATE_GENERIC_ERROR;
-    }
-
-  database = g_tls_connection_get_database (G_TLS_CONNECTION (openssl));
-
-  /* If there's no database, then G_TLS_CERTIFICATE_UNKNOWN_CA must be flagged,
-   * and this function is only called if there are no flags.
-   */
-  g_assert (database);
-
-  /* Note we have to call this even if resp is NULL, because it will check
-   * whether Must-Staple is set.
-   */
-  return g_tls_database_openssl_verify_ocsp_response (G_TLS_DATABASE_OPENSSL (database),
-                                                      peer_certificate,
-                                                      resp);
-}
-
-static GTlsCertificateFlags
-g_tls_client_connection_openssl_verify_peer_certificate (GTlsConnectionBase   *tls,
-                                                         GTlsCertificate      *certificate,
-                                                         GTlsCertificateFlags  flags)
-{
-  GTlsClientConnectionOpenssl *openssl = G_TLS_CLIENT_CONNECTION_OPENSSL (tls);
-
-  if (flags == 0)
-    flags = verify_ocsp_response (openssl, certificate);
-
-  return flags;
-}
-
 static SSL *
 g_tls_client_connection_openssl_get_ssl (GTlsConnectionOpenssl *connection)
 {
@@ -292,7 +247,6 @@ g_tls_client_connection_openssl_class_init (GTlsClientConnectionOpensslClass *kl
   gobject_class->set_property         = g_tls_client_connection_openssl_set_property;
 
   base_class->complete_handshake      = g_tls_client_connection_openssl_complete_handshake;
-  base_class->verify_peer_certificate = g_tls_client_connection_openssl_verify_peer_certificate;
 
   openssl_class->get_ssl              = g_tls_client_connection_openssl_get_ssl;
 
@@ -575,11 +529,6 @@ g_tls_client_connection_openssl_initable_init (GInitable       *initable,
 #endif
 
   SSL_set_connect_state (client->ssl);
-
-#if (OPENSSL_VERSION_NUMBER >= 0x0090808fL) && !defined(OPENSSL_NO_TLSEXT) && \
-    !defined(OPENSSL_NO_OCSP)
-  SSL_set_tlsext_status_type (client->ssl, TLSEXT_STATUSTYPE_ocsp);
-#endif
 
   if (!g_tls_client_connection_openssl_parent_initable_iface->
       init (initable, cancellable, error))

@@ -240,108 +240,6 @@ test_verify_database_bad_combo (TestVerify      *test,
   g_object_unref (identity);
 }
 
-static GTlsCertificate *
-load_certificate_chain (const char  *filename,
-                        GError     **error)
-{
-  GList *certificates;
-  GTlsCertificate *chain = NULL, *prev_chain = NULL;
-  GTlsBackend *backend;
-  GByteArray *der;
-  GList *l;
-
-  certificates = g_tls_certificate_list_new_from_file (filename, error);
-  if (!certificates)
-    return NULL;
-
-  backend = g_tls_backend_get_default ();
-  certificates = g_list_reverse (certificates);
-  for (l = certificates; l; l = g_list_next (l))
-    {
-      prev_chain = chain;
-      g_object_get (l->data, "certificate", &der, NULL);
-      chain = g_object_new (g_tls_backend_get_certificate_type (backend),
-                            "certificate", der,
-                            "issuer", prev_chain,
-                            NULL);
-      g_byte_array_unref (der);
-      g_clear_object (&prev_chain);
-    }
-
-  g_list_free_full (certificates, g_object_unref);
-  return chain;
-}
-
-static gboolean
-is_certificate_in_chain (GTlsCertificate *chain,
-                         GTlsCertificate *cert)
-{
-  while (chain)
-    {
-      if (g_tls_certificate_is_same (chain, cert))
-        return TRUE;
-      chain = g_tls_certificate_get_issuer (chain);
-    }
-
-  return FALSE;
-}
-
-static void
-test_verify_with_incorrect_root_in_chain (void)
-{
-  GTlsCertificate *ca_verisign_sha1;
-  GTlsDatabase *database;
-  GError *error = NULL;
-  GTlsCertificate *chain;
-  GSocketConnectable *identity;
-  GTlsCertificateFlags errors;
-
-  /*
-   * This database contains a single anchor certificate of:
-   * C = US, O = "VeriSign, Inc.", OU = Class 3 Public Primary Certification Authority
-   */
-  database = g_tls_file_database_new (tls_test_file_path ("ca-verisign-sha1.pem"), &error);
-  g_assert_no_error (error);
-  g_assert_true (G_IS_TLS_DATABASE (database));
-
-  ca_verisign_sha1 = g_tls_certificate_new_from_file (tls_test_file_path ("ca-verisign-sha1.pem"), &error);
-  g_assert_no_error (error);
-  g_assert_true (G_IS_TLS_CERTIFICATE (ca_verisign_sha1));
-
-  /*
-   * This certificate chain contains a root certificate with that same issuer, public key:
-   * C = US, O = "VeriSign, Inc.", OU = Class 3 Public Primary Certification Authority
-   *
-   * But it is not the same certificate in our database. However our database should
-   * verify this chain as valid, since the issuer fields and signatures should chain up
-   * to the certificate in our database.
-   */
-  chain = load_certificate_chain (tls_test_file_path ("chain-with-verisign-md2.pem"), &error);
-  g_assert_no_error (error);
-  g_assert_true (G_IS_TLS_CERTIFICATE (chain));
-
-  g_assert_nonnull (g_tls_certificate_get_issuer (chain));
-  g_assert_nonnull (g_tls_certificate_get_issuer (g_tls_certificate_get_issuer (chain)));
-  g_assert_true (is_certificate_in_chain (chain, chain));
-  g_assert_false (is_certificate_in_chain (chain, ca_verisign_sha1));
-
-
-  identity = g_network_address_new ("secure-test.streamline-esolutions.com", 443);
-
-  errors = g_tls_database_verify_chain (database, chain,
-                                        G_TLS_DATABASE_PURPOSE_AUTHENTICATE_SERVER,
-                                        identity, NULL, 0, NULL, &error);
-  g_assert_no_error (error);
-  errors &= ~G_TLS_CERTIFICATE_EXPIRED; /* so that this test doesn't expire */
-  errors &= ~G_TLS_CERTIFICATE_INSECURE; /* allow MD2 */
-  g_assert_cmpuint (errors, ==, 0);
-
-  g_object_unref (chain);
-  g_object_unref (ca_verisign_sha1);
-  g_object_unref (identity);
-  g_object_unref (database);
-}
-
 /* -----------------------------------------------------------------------------
  * FILE DATABASE
  */
@@ -547,8 +445,6 @@ main (int   argc,
               setup_verify, test_verify_database_bad_expired, teardown_verify);
   g_test_add ("/tls/" BACKEND "/database/verify-bad-combo", TestVerify, NULL,
               setup_verify, test_verify_database_bad_combo, teardown_verify);
-  g_test_add_func ("/tls/" BACKEND "/database/verify-with-incorrect-root-in-chain",
-                   test_verify_with_incorrect_root_in_chain);
 
   g_test_add_func ("/tls/" BACKEND "/file-database/anchors-property",
                    test_anchors_property);

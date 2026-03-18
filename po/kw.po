@@ -1,35 +1,39 @@
-# Catalan translation for glib-networking.
-# Copyright (C) 2011 glib-networking's COPYRIGHT HOLDER
+# Cornish translation for glib-networking.
+# Copyright (C) 2026 glib-networking's COPYRIGHT HOLDER
 # This file is distributed under the same license as the glib-networking package.
-# David Planella <david.planella@gmail.com>, 2011, 2012.
-# Gil Forcada <gilforcada@guifi.net>, 2012.
-# Jordi Mas i Hernàndez <jmas@softcatala.org>, 2020-2023
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+# Flynn Peck <cirilla@tuta.io>, 2026.
+#
 msgid ""
 msgstr ""
 "Project-Id-Version: glib-networking master\n"
 "Report-Msgid-Bugs-To: https://gitlab.gnome.org/GNOME/glib-networking/issues\n"
-"POT-Creation-Date: 2024-02-28 12:09+0000\n"
-"PO-Revision-Date: 2024-02-28 22:09+0100\n"
-"Last-Translator: Jordi Mas i Hernàndez <jmas@softcatala.org>\n"
-"Language-Team: Catalan <gnome-dl@llistes.softcatala.org>\n"
-"Language: ca\n"
+"POT-Creation-Date: 2025-10-01 10:55+0000\n"
+"PO-Revision-Date: 2026-01-27 15:54+0000\n"
+"Last-Translator: Flynn Peck <cirilla@tuta.io>\n"
+"Language-Team: kw\n"
+"Language: kw\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=2; plural=n != 1;\n"
-"X-Generator: Poedit 2.4.2\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+"X-DL-VCS-Web: https://gitlab.gnome.org/GNOME/glib-networking/\n"
+"X-DL-Lang: kw\n"
+"X-DL-Module: glib-networking\n"
+"X-DL-Branch: master\n"
+"X-DL-Domain: po\n"
+"X-DL-State: Translating\n"
+"X-Generator: Gtranslator 49.0\n"
 
 #: proxy/libproxy/glibproxyresolver.c:165
 msgid "Proxy resolver internal error."
-msgstr ""
-"S'ha produït un error intern al sistema de resolució del servidor "
-"intermediari."
+msgstr "Error pervedhek yn digelmer proksy."
 
 #: tls/base/gtlsconnection-base.c:616 tls/base/gtlsinputstream.c:78
 #: tls/base/gtlsinputstream.c:141 tls/base/gtlsoutputstream.c:78
 #: tls/base/gtlsoutputstream.c:143
 msgid "Connection is closed"
-msgstr "La connexió està tancada"
+msgstr "Junyans yw degeys"
 
 #. Cannot perform a blocking operation during a handshake on the
 #. * same thread that triggered the handshake. The only way this can
@@ -40,102 +44,99 @@ msgstr "La connexió està tancada"
 #.
 #: tls/base/gtlsconnection-base.c:690
 msgid "Cannot perform blocking operation during TLS handshake"
-msgstr "No es pot dur a terme una operació de bloqueig durant l'encaixada TLS"
+msgstr "Na yllir gwruthyl oberyans lettys dres shackyans leuv TLS"
 
 #: tls/base/gtlsconnection-base.c:755 tls/base/gtlsconnection-base.c:1303
 #: tls/openssl/gtlsconnection-openssl.c:373
 msgid "Socket I/O timed out"
-msgstr "S'ha excedit el temps d'espera d'entrada/sortida del sòcol"
+msgstr "Kraw Y/E yn termyn yn-mes"
 
 #: tls/base/gtlsconnection-base.c:929
 msgid "Server required TLS certificate"
-msgstr "El servidor requereix un certificat TLS"
+msgstr "Servell rekwirys testskrif TLS"
 
-#: tls/base/gtlsconnection-base.c:1519
+#: tls/base/gtlsconnection-base.c:1516
 #, c-format
 msgid "Handshake is not finished, no channel binding information yet"
-msgstr ""
-"L'encaixada no ha finalitzat, encara no hi ha informació d'enllaç de canal"
+msgstr "Shackyans leuv andeu, kedhlow chanel vyth hwath"
 
-#: tls/base/gtlsconnection-base.c:1598
+#: tls/base/gtlsconnection-base.c:1595
 msgid "Peer does not support safe renegotiation"
-msgstr ""
-"L'altre extrem de la connexió no és compatible amb una negociació segura"
+msgstr "Koweth na skoodhya dasnegysyans saw"
 
-#: tls/base/gtlsconnection-base.c:1746 tls/gnutls/gtlsconnection-gnutls.c:490
+#: tls/base/gtlsconnection-base.c:1743 tls/gnutls/gtlsconnection-gnutls.c:490
 #: tls/openssl/gtlsconnection-openssl.c:209
-#: tls/openssl/gtlsconnection-openssl.c:850
-#, c-format
+#: tls/openssl/gtlsconnection-openssl.c:852
 msgid "Unacceptable TLS certificate"
-msgstr "No es pot acceptar el certificat TLS"
+msgstr "Testskrif TLS ankemeradow"
 
-#: tls/base/gtlsconnection-base.c:2218
+#: tls/base/gtlsconnection-base.c:2215
 #, c-format
 msgid "Receive flags are not supported"
-msgstr "Els senyaladors de recepció no són compatibles"
+msgstr "Baneryow degemeres anskoodhys"
 
-#: tls/base/gtlsconnection-base.c:2365
+#: tls/base/gtlsconnection-base.c:2362
 #, c-format
 msgid "Send flags are not supported"
-msgstr "Els senyaladors d'enviament no són compatibles"
+msgstr "Baneryow danvon anskoodhys"
 
 #: tls/gnutls/gtlscertificate-gnutls.c:297
-#: tls/openssl/gtlscertificate-openssl.c:309
+#: tls/openssl/gtlscertificate-openssl.c:318
 #, c-format
 msgid "Failed to import PKCS #12: %s"
-msgstr "No s'ha pogut importar PKCS #12: %s"
+msgstr "Y fyllis ynperthi PKCS #12: %s"
 
 #: tls/gnutls/gtlscertificate-gnutls.c:520
-#: tls/openssl/gtlscertificate-openssl.c:519
+#: tls/openssl/gtlscertificate-openssl.c:537
 #, c-format
 msgid "Could not parse DER certificate: %s"
-msgstr "No s'ha pogut analitzar el certificat DER: %s"
+msgstr "Na yllir redya testskrif DER: %s"
 
 #: tls/gnutls/gtlscertificate-gnutls.c:541
-#: tls/openssl/gtlscertificate-openssl.c:540
-#, c-format
-msgid "Could not parse PEM certificate: %s"
-msgstr "No s'ha pogut analitzar el certificat PEM: %s"
-
-#: tls/gnutls/gtlscertificate-gnutls.c:564
 #: tls/openssl/gtlscertificate-openssl.c:561
 #, c-format
+msgid "Could not parse PEM certificate: %s"
+msgstr "Na yllir redya testskrif PEM: %s"
+
+#: tls/gnutls/gtlscertificate-gnutls.c:564
+#: tls/openssl/gtlscertificate-openssl.c:585
+#, c-format
 msgid "Could not parse DER private key: %s"
-msgstr "No s'ha pogut analitzar la clau privada DER: %s"
+msgstr "Na yllir redya alhwedh privedh DER: %s"
 
 #: tls/gnutls/gtlscertificate-gnutls.c:587
-#: tls/openssl/gtlscertificate-openssl.c:582
+#: tls/openssl/gtlscertificate-openssl.c:609
 #, c-format
 msgid "Could not parse PEM private key: %s"
-msgstr "No s'ha pogut analitzar la clau privada PEM: %s"
+msgstr "Na yllir redya alhwedh privedh PEM: %s"
 
 #: tls/gnutls/gtlscertificate-gnutls.c:613
 #, c-format
 msgid "Could not import PKCS #11 certificate URI: %s"
-msgstr "No s'han pogut importar l'URI del certificat PKCS #11: %s"
+msgstr "Na yllir ynperthi URI testskrif PKCS #11: %s"
 
 #: tls/gnutls/gtlscertificate-gnutls.c:657
-#: tls/openssl/gtlscertificate-openssl.c:620
+#: tls/openssl/gtlscertificate-openssl.c:647
 msgid "No certificate data provided"
-msgstr "No s'ha proporcionat cap dada per al certificat"
+msgstr "Data testskrif provys vyth"
 
 #: tls/gnutls/gtlscertificate-gnutls.c:981
-#: tls/gnutls/gtlsconnection-gnutls.c:1057
+#: tls/gnutls/gtlsconnection-gnutls.c:1055
 #, c-format
 msgid "Cannot verify peer identity of unexpected type %s"
-msgstr "No es pot verificar la identitat del parell del tipus %s inesperat"
+msgstr "Na yllir gwirhe honanieth a eghen angwaytys %s"
 
 #: tls/gnutls/gtlsconnection-gnutls.c:213
 #: tls/gnutls/gtlsconnection-gnutls.c:223
 msgid "Could not create TLS connection:"
-msgstr "No s'ha pogut crear una connexió TLS:"
+msgstr "Na yllir gul junya TLS:"
 
 #: tls/gnutls/gtlsconnection-gnutls.c:243
-#: tls/openssl/gtlsclientconnection-openssl.c:560
+#: tls/openssl/gtlsclientconnection-openssl.c:512
 #: tls/openssl/gtlsserverconnection-openssl.c:455
 #, c-format
 msgid "Could not create TLS connection: %s"
-msgstr "No s'ha pogut crear una connexió TLS: %s"
+msgstr "Na yllir gul junyans TLS: %s"
 
 #: tls/gnutls/gtlsconnection-gnutls.c:434
 #: tls/gnutls/gtlsconnection-gnutls.c:445
@@ -143,127 +144,120 @@ msgstr "No s'ha pogut crear una connexió TLS: %s"
 #: tls/openssl/gtlsconnection-openssl.c:176
 #, c-format
 msgid "Peer failed to perform TLS handshake: %s"
-msgstr ""
-"L'altre extrem de la connexió no ha pogut realitzar l'encaixada TLS: %s"
+msgstr "Koweth fyllis gwruthyl shackyans leuv TLS: %s"
 
 #: tls/gnutls/gtlsconnection-gnutls.c:467
 #: tls/openssl/gtlsconnection-openssl.c:246
 msgid "TLS connection closed unexpectedly"
-msgstr "La connexió TLS s'ha tancat de manera inesperada"
+msgstr "Junyans TLS degeys angwaytys"
 
 #: tls/gnutls/gtlsconnection-gnutls.c:482
 #: tls/openssl/gtlsconnection-openssl.c:201
 msgid "TLS connection peer did not send a certificate"
-msgstr "L'altre extrem de la connexió TLS no ha enviat cap certificat"
+msgstr "Koweth junyans TLS na danvon unn testskrif"
 
 #: tls/gnutls/gtlsconnection-gnutls.c:498
 #, c-format
 msgid "Peer sent fatal TLS alert: %s"
-msgstr "L'altre extrem de la connexió ha enviat una alerta fatal TLS: %s"
+msgstr "Koweth danvenys gwarnyans TLS marwel: %s"
 
 #: tls/gnutls/gtlsconnection-gnutls.c:508
 msgid "Protocol version downgrade attack detected"
-msgstr "Atacat de rebaixa de la versió de protocol detectat"
+msgstr "Omsettyans versyon protokol helerghys"
 
 #: tls/gnutls/gtlsconnection-gnutls.c:517
 #, c-format
 msgid "Message is too large for DTLS connection; maximum is %u byte"
 msgid_plural "Message is too large for DTLS connection; maximum is %u bytes"
-msgstr[0] ""
-"El missatge és massa gran per a una connexió DTLS; el màxim és %u byte"
-msgstr[1] ""
-"El missatge és massa gran per a una connexió DTLS; el màxim és %u bytes"
+msgstr[0] "Messach yw re bras rag junyans DTLS; mohya yw %u bayt"
+msgstr[1] "Messach yw re bras rag junyans DTLS; mohya yw %u baytys"
 
 #: tls/gnutls/gtlsconnection-gnutls.c:526
 msgid "The operation timed out"
-msgstr "L'operació ha excedit el temps"
+msgstr "An oberyans yn termyn yn-mes"
 
 #: tls/gnutls/gtlsconnection-gnutls.c:878
 #, c-format
 msgid "Error performing TLS handshake: %s"
-msgstr "S'ha produït un error en realitzar l'encaixada TLS: %s"
+msgstr "Error dres ow gwruthyl shackyans leuv TLS: %s"
 
 #: tls/gnutls/gtlsconnection-gnutls.c:981
-#: tls/openssl/gtlsconnection-openssl.c:629
+#: tls/openssl/gtlsconnection-openssl.c:630
 msgid "Error performing TLS handshake"
-msgstr "S'ha produït un error en realitzar l'encaixada TLS"
+msgstr "Error dres ow gwruthyl shackyans levu TLS"
 
-#: tls/gnutls/gtlsconnection-gnutls.c:1156
+#: tls/gnutls/gtlsconnection-gnutls.c:1154
 #, c-format
 msgid ""
 "Empty channel binding data indicates a bug in the TLS library implementation"
-msgstr ""
-"Les dades buides de vinculació del canal indiquen un error en la "
-"implementació de la biblioteca TLS"
+msgstr "Data kolm chanel gwag sinya unn kudyn gans an gweythresans lyverva TLS"
 
-#: tls/gnutls/gtlsconnection-gnutls.c:1174
+#: tls/gnutls/gtlsconnection-gnutls.c:1172
 #, c-format
 msgid "Channel binding type is not implemented in the TLS library"
-msgstr "El tipus d'enllaç del canal no està implementat a la biblioteca TLS"
+msgstr "Eghen kolm chanel na kowlwulys y'n lyverva TLS"
 
-#: tls/gnutls/gtlsconnection-gnutls.c:1178
+#: tls/gnutls/gtlsconnection-gnutls.c:1176
 #, c-format
 msgid "Channel binding data is not yet available"
-msgstr "Les dades d'enllaç del canal encara no estan disponibles"
+msgstr "Data kolm chanel na kavadow hwath"
 
-#: tls/gnutls/gtlsconnection-gnutls.c:1230
-#: tls/openssl/gtlsconnection-openssl.c:825
+#: tls/gnutls/gtlsconnection-gnutls.c:1228
+#: tls/openssl/gtlsconnection-openssl.c:827
 #, c-format
 msgid "Requested channel binding type is not implemented"
-msgstr "No s'ha implementat el tipus de vinculació de canal sol·licitada"
+msgstr "Eghen kolm chanel pejys na kowlwulys"
 
-#: tls/gnutls/gtlsconnection-gnutls.c:1251
-#: tls/gnutls/gtlsconnection-gnutls.c:1311
-#: tls/openssl/gtlsconnection-openssl.c:843
-#: tls/openssl/gtlsconnection-openssl.c:939
+#: tls/gnutls/gtlsconnection-gnutls.c:1249
+#: tls/gnutls/gtlsconnection-gnutls.c:1309
+#: tls/openssl/gtlsconnection-openssl.c:845
+#: tls/openssl/gtlsconnection-openssl.c:941
 msgid "Error reading data from TLS socket"
-msgstr "S'ha produït un error en llegir les dades del sòcol TLS"
+msgstr "Error dres ow redya data rag kraw TLS"
 
 #. flags
-#: tls/gnutls/gtlsconnection-gnutls.c:1333
-#: tls/gnutls/gtlsconnection-gnutls.c:1396
-#: tls/openssl/gtlsconnection-openssl.c:1018
+#: tls/gnutls/gtlsconnection-gnutls.c:1331
+#: tls/gnutls/gtlsconnection-gnutls.c:1394
+#: tls/openssl/gtlsconnection-openssl.c:1020
 msgid "Error writing data to TLS socket"
-msgstr "S'ha produït un error en escriure les dades al sòcol TLS"
+msgstr "Error dres ow skrifa data rag kraw TLS"
 
-#: tls/gnutls/gtlsconnection-gnutls.c:1366
+#: tls/gnutls/gtlsconnection-gnutls.c:1364
 #, c-format
 msgid "Message of size %lu byte is too large for DTLS connection"
 msgid_plural "Message of size %lu bytes is too large for DTLS connection"
-msgstr[0] "El missatge de mida %lu byte és massa gran per a la connexió DTLS"
-msgstr[1] "El missatge de mida %lu bytes és massa gran per a la connexió DTLS"
+msgstr[0] "Messach a braster %lu bayt yw re bras rag junyans DTLS"
+msgstr[1] "Messach a braster %lu baytys yw re bras rag junyans DTLS"
 
-#: tls/gnutls/gtlsconnection-gnutls.c:1368
+#: tls/gnutls/gtlsconnection-gnutls.c:1366
 #, c-format
 msgid "(maximum is %u byte)"
 msgid_plural "(maximum is %u bytes)"
-msgstr[0] "(el màxim és %u byte)"
-msgstr[1] "(el màxim és %u bytes)"
+msgstr[0] "(moyha yw %u bayt)"
+msgstr[1] "(moyha yw %u baytys)"
 
-#: tls/gnutls/gtlsconnection-gnutls.c:1415
+#: tls/gnutls/gtlsconnection-gnutls.c:1413
 #, c-format
 msgid "Error performing TLS close: %s"
-msgstr "S'ha produït un error en realitzar el tancament TLS: %s"
+msgstr "Error dres gwruthyl degeans TLS: %s"
 
 #: tls/gnutls/gtlsdatabase-gnutls.c:92
 #, c-format
 msgid "Failed to allocate credentials: %s"
-msgstr "S'ha produït un error en assignar les credencials: %s"
+msgstr "Y fyllis kevranna manylyon: %s"
 
 #: tls/gnutls/gtlsdatabase-gnutls.c:594
 msgid ""
 "Failed to load system trust store: GnuTLS was not configured with a system "
 "trust"
 msgstr ""
-"S'ha produït un error en carregar l'emmagatzematge del sistema de confiança: "
-"GnuTLS no està configurat amb un sistema de confiança"
+"Y fyllis karga gwithva system fydhyans: GnuTLS yw anselys gans unn fydhyans "
+"system"
 
 #: tls/gnutls/gtlsdatabase-gnutls.c:599 tls/openssl/gtlsdatabase-openssl.c:381
 #, c-format
 msgid "Failed to load system trust store: %s"
-msgstr ""
-"S'ha produït un error en carregar l'emmagatzematge del sistema de confiança: "
-"%s"
+msgstr "Y fyllis karga gwithva fydhyans system: %s"
 
 #: tls/gnutls/gtlsdatabase-gnutls.c:605
 #, c-format
@@ -271,137 +265,123 @@ msgid ""
 "System trust contains zero trusted certificates; please investigate your "
 "GnuTLS configuration"
 msgstr ""
-"El sistema de confiança no conté cap certificat; investiga la configuració "
-"del GnuTLS"
+"Fydhyans system kontaynya mann testskrifow fydhys; mar pleg hwithra dha "
+"selyans GnuTLS"
 
 #: tls/gnutls/gtlsdatabase-gnutls.c:621
 #, c-format
 msgid "Failed to initialize trust list: %s"
-msgstr "S'ha produït un error en emplenar la llista de confiança: %s"
+msgstr "Y fyllis dalleth rol fydhyans: %s"
 
 #: tls/gnutls/gtlsfiledatabase-gnutls.c:153
 #: tls/openssl/gtlsfiledatabase-openssl.c:456
 #, c-format
 msgid "Failed to populate trust list from %s: %s"
-msgstr ""
-"S'ha produït un error en emplenar la llista del sistema de confiança des de "
-"%s: %s"
+msgstr "Y fyllis pobla rol fydhyans dhyworth %s: %s"
 
 #: tls/gnutls/gtlsserverconnection-gnutls.c:120
 #: tls/openssl/gtlsserverconnection-openssl.c:172
 msgid "Certificate has no private key"
-msgstr "El certificat no té cap clau privada"
+msgstr "Testskrif kavos alhwedh privedh vyth"
 
-#: tls/openssl/gtlsclientconnection-openssl.c:388
+#: tls/openssl/gtlsclientconnection-openssl.c:340
 #: tls/openssl/gtlsserverconnection-openssl.c:299
 #, c-format
 msgid "Could not set TLS cipher list: %s"
-msgstr "No s'ha pogut establir de la llista de xifratge TLS: %s"
+msgstr "Na yllir rol cyfer TLS: %s"
 
-#: tls/openssl/gtlsclientconnection-openssl.c:416
+#: tls/openssl/gtlsclientconnection-openssl.c:368
 #: tls/openssl/gtlsserverconnection-openssl.c:327
 #, c-format
 msgid "Could not set MAX protocol to %d: %s"
-msgstr "No s'ha pogut establir el protocol MAX a %d: %s"
+msgstr "Na yllir protokol MAX dhe %d: %s"
 
-#: tls/openssl/gtlsclientconnection-openssl.c:505
+#: tls/openssl/gtlsclientconnection-openssl.c:457
 #: tls/openssl/gtlsserverconnection-openssl.c:390
 #, c-format
 msgid "Could not create TLS context: %s"
-msgstr "No s'ha pogut crear un context TLS: %s"
+msgstr "Na yllir gul kettesten TLS: %s"
 
 #: tls/openssl/gtlsconnection-openssl.c:217
-#, c-format
 msgid "Unacceptable TLS certificate authority"
-msgstr "No es pot acceptar l'autoritat del certificat TLS"
+msgstr "Awtorita testskrif TLS ankemeradow"
 
 #: tls/openssl/gtlsconnection-openssl.c:225
 msgid "Digest too big for RSA key"
-msgstr "Resum massa gran per a la clau RSA"
+msgstr "Dijest re bras rag alhwedh RSA"
 
 #: tls/openssl/gtlsconnection-openssl.c:234
 msgid "Secure renegotiation is disabled"
-msgstr "La renegociació segura està inhabilitada"
+msgstr "Dasnegysyans saw yw marow"
 
 #: tls/openssl/gtlsconnection-openssl.c:268
 #, c-format
 msgid "%s: The connection is broken"
-msgstr "%s: la connexió està trencada"
+msgstr "%s: An junyans yw terrys"
 
-#: tls/openssl/gtlsconnection-openssl.c:675
-#, c-format
+#: tls/openssl/gtlsconnection-openssl.c:676
 msgid "The request is invalid."
-msgstr "La sol·licitud no és vàlida."
+msgstr "An govyn yw anewn."
 
-#: tls/openssl/gtlsconnection-openssl.c:698
-#, c-format
+#: tls/openssl/gtlsconnection-openssl.c:699
 msgid "Channel binding data tls-unique is not available"
-msgstr "Les dades de vinculació del canal tls-unique no estan disponibles"
+msgstr "Data kolm chanel tls-unique ankavadow"
 
-#: tls/openssl/gtlsconnection-openssl.c:721
-#, c-format
+#: tls/openssl/gtlsconnection-openssl.c:722
 msgid "X.509 Certificate is not available on the connection"
-msgstr "El certificat X.509 no està disponible a la connexió"
+msgstr "Testskrif X.509 na kavadow war'n junyans"
 
-#: tls/openssl/gtlsconnection-openssl.c:729
-#, c-format
+#: tls/openssl/gtlsconnection-openssl.c:731
 msgid "Unable to obtain certificate signature algorithm"
-msgstr "No s'ha pogut obtenir l'algoritme de signatura de certificat"
+msgstr "Anabel kavos method sinans testskrif"
 
-#: tls/openssl/gtlsconnection-openssl.c:749
-#, c-format
+#: tls/openssl/gtlsconnection-openssl.c:751
 msgid ""
 "Current X.509 certificate uses unknown or unsupported signature algorithm"
-msgstr ""
-"El certificat X.509 actual utilitza un algoritme de signatura desconegut o "
-"no admès"
+msgstr "Testskrif X.509 a-lemmyn devnydhya method sinans ankoth po anskoodhys"
 
-#: tls/openssl/gtlsconnection-openssl.c:767
-#, c-format
+#: tls/openssl/gtlsconnection-openssl.c:769
 msgid "Failed to generate X.509 certificate digest"
-msgstr "No s'ha pogut generar el resum del certificat X.509"
+msgstr "Y fyllis dinythi dijest testskrif X.509"
 
-#: tls/openssl/gtlsconnection-openssl.c:798
-#, c-format
+#: tls/openssl/gtlsconnection-openssl.c:800
 msgid "TLS Connection does not support TLS-Exporter feature"
-msgstr "La connexió TLS no admet la funcionalitat TLS-Exporter"
+msgstr "Junyans TLS na skoodhya nas TLS-Exporter"
 
-#: tls/openssl/gtlsconnection-openssl.c:801
-#, c-format
+#: tls/openssl/gtlsconnection-openssl.c:803
 msgid "Unexpected error while exporting keying data"
-msgstr ""
-"S'ha produït un error inesperat mentre s'exportaven les dades de la clau"
+msgstr "Error angwaytys dres owth esperthi data alwedhow"
 
-#: tls/openssl/gtlsconnection-openssl.c:1079
+#: tls/openssl/gtlsconnection-openssl.c:1081
 msgid "Error performing TLS close"
-msgstr "S'ha produït un error en realitzar el tancament TLS"
+msgstr "Error dres gwruthyl degeans TLS"
 
 #: tls/openssl/gtlsdatabase-openssl.c:174
 msgid "Could not get trust settings for certificate"
-msgstr "No s'han pogut obtenir els paràmetres de confiança per al certificat"
+msgstr "Na yllir kerghes settyansow fydhyans rag testskrif"
 
 #: tls/openssl/gtlsdatabase-openssl.c:261
 msgid "Could not retrieve certificates"
-msgstr "No s'han pogut recuperar els certificats"
+msgstr "Na yllir kerghes testskrifow"
 
 #: tls/openssl/gtlsdatabase-openssl.c:358
 msgid "Could not get root certificate store"
-msgstr "No s'ha pogut obtenir el magatzem de certificats arrel"
+msgstr "Na yllir kavos gwithva testskrifow gwreydhen"
 
 #: tls/openssl/gtlsdatabase-openssl.c:365
 msgid "Could not get CA certificate store"
-msgstr "No s'ha pogut obtenir el magatzem de certificats de CA"
+msgstr "Na yllir kavos gwitha testkrifow CA"
 
 #: tls/openssl/gtlsdatabase-openssl.c:430
 msgid "Could not create CA store"
-msgstr "No s'ha pogut crear un emmagatzematge CA"
+msgstr "Na yllir gul gwithva CA"
 
 #: tls/openssl/gtlsserverconnection-openssl.c:184
 #, c-format
 msgid "There is a problem with the certificate: %s"
-msgstr "Hi ha un problema amb el certificat: %s"
+msgstr "Yma hager vargen gans an testskrif: %s"
 
 #: tls/openssl/gtlsserverconnection-openssl.c:193
 #, c-format
 msgid "There is a problem with the certificate private key: %s"
-msgstr "Hi ha un problema amb el certificat de la clau privada: %s"
+msgstr "Yma ynn kudyn gans an alwedh privedh testskrif: %s"

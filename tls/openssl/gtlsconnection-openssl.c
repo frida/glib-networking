@@ -87,18 +87,6 @@ g_tls_connection_openssl_finalize (GObject *object)
   G_OBJECT_CLASS (g_tls_connection_openssl_parent_class)->finalize (object);
 }
 
-static GTlsSafeRenegotiationStatus
-g_tls_connection_openssl_handshake_thread_safe_renegotiation_status (GTlsConnectionBase *tls)
-{
-  GTlsConnectionOpenssl *openssl = G_TLS_CONNECTION_OPENSSL (tls);
-  SSL *ssl;
-
-  ssl = g_tls_connection_openssl_get_ssl (openssl);
-
-  return SSL_get_secure_renegotiation_support (ssl) ? G_TLS_SAFE_RENEGOTIATION_SUPPORTED_BY_PEER
-                                                    : G_TLS_SAFE_RENEGOTIATION_UNSUPPORTED;
-}
-
 static GTlsConnectionBaseStatus
 end_openssl_io (GTlsConnectionOpenssl  *openssl,
                 GIOCondition            direction,
@@ -132,7 +120,7 @@ end_openssl_io (GTlsConnectionOpenssl  *openssl,
       return G_TLS_CONNECTION_BASE_TRY_AGAIN;
     }
 
-  if (err_code == SSL_ERROR_ZERO_RETURN && direction == G_IO_IN)
+  if (err_code == SSL_ERROR_ZERO_RETURN)
     return G_TLS_CONNECTION_BASE_OK;
 
   if (status == G_TLS_CONNECTION_BASE_OK ||
@@ -156,7 +144,7 @@ end_openssl_io (GTlsConnectionOpenssl  *openssl,
   err_lib = ERR_GET_LIB (err);
   reason = ERR_GET_REASON (err);
 
-  if (g_tls_connection_base_is_handshaking (tls) && !g_tls_connection_base_ever_handshaked (tls))
+  if (g_tls_connection_base_is_handshaking (tls))
     {
       if (reason == SSL_R_SSLV3_ALERT_HANDSHAKE_FAILURE && my_error)
         {
@@ -225,16 +213,6 @@ end_openssl_io (GTlsConnectionOpenssl  *openssl,
                            _("Digest too big for RSA key"));
       return G_TLS_CONNECTION_BASE_ERROR;
     }
-
-#ifdef SSL_R_NO_RENEGOTIATION
-  if (reason == SSL_R_NO_RENEGOTIATION)
-    {
-      g_clear_error (&my_error);
-      g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
-                           _("Secure renegotiation is disabled"));
-      return G_TLS_CONNECTION_BASE_REHANDSHAKE;
-    }
-#endif
 
 #ifdef SSL_R_UNEXPECTED_EOF_WHILE_READING
   if (reason == SSL_R_UNEXPECTED_EOF_WHILE_READING)
@@ -590,49 +568,8 @@ g_tls_connection_openssl_complete_handshake (GTlsConnectionBase   *tls,
   *ciphersuite_name = g_strdup (SSL_get_cipher_name (ssl));
 }
 
-static int
-perform_rehandshake (SSL      *ssl,
-                     gpointer  user_data)
-{
-  GTlsConnectionBase *tls = user_data;
-  int ret = 1; /* always look on the bright side of life */
-
-#if OPENSSL_VERSION_NUMBER >= 0x10101000L
-  if (SSL_version(ssl) >= TLS1_3_VERSION)
-    ret = SSL_key_update (ssl, SSL_KEY_UPDATE_REQUESTED);
-  else if (SSL_get_secure_renegotiation_support (ssl) && !(SSL_get_options(ssl) & SSL_OP_NO_RENEGOTIATION))
-    /* remote and local peers both can rehandshake */
-    ret = SSL_renegotiate (ssl);
-  else
-    g_tls_log_debug (tls, "Secure renegotiation is not supported");
-#else
-  ret = SSL_renegotiate (ssl);
-#endif
-
-  return ret;
-}
-
-static GTlsConnectionBaseStatus
-g_tls_connection_openssl_handshake_thread_request_rehandshake (GTlsConnectionBase  *tls,
-                                                               gint64               timeout,
-                                                               GCancellable        *cancellable,
-                                                               GError             **error)
-{
-  /* On a client-side connection, SSL_renegotiate() itself will start
-   * a rehandshake, so we only need to do something special here for
-   * server-side connections.
-   */
-  if (!G_IS_TLS_SERVER_CONNECTION (tls))
-    return G_TLS_CONNECTION_BASE_OK;
-
-  return perform_openssl_io (G_TLS_CONNECTION_OPENSSL (tls), G_IO_IN | G_IO_OUT,
-                             perform_rehandshake, tls, timeout, cancellable,
-                             NULL, error, N_("Error performing TLS handshake"));
-}
-
 static GTlsCertificate *
-g_tls_connection_openssl_retrieve_peer_certificate (GTlsConnectionBase *tls,
-                                                    gboolean           *using_psk)
+g_tls_connection_openssl_retrieve_peer_certificate (GTlsConnectionBase *tls)
 {
   X509 *peer;
   STACK_OF (X509) *certs;
@@ -640,9 +577,6 @@ g_tls_connection_openssl_retrieve_peer_certificate (GTlsConnectionBase *tls,
   SSL *ssl;
 
   ssl = g_tls_connection_openssl_get_ssl (G_TLS_CONNECTION_OPENSSL (tls));
-
-  if (using_psk)
-    *using_psk = SSL_get_psk_identity (ssl) != NULL;
 
   peer = SSL_get_peer_certificate (ssl);
   if (!peer)
@@ -1096,8 +1030,6 @@ g_tls_connection_openssl_class_init (GTlsConnectionOpensslClass *klass)
   base_class->prepare_handshake                          = g_tls_connection_openssl_prepare_handshake;
   base_class->verify_chain                               = g_tls_connection_openssl_verify_chain;
   base_class->complete_handshake                         = g_tls_connection_openssl_complete_handshake;
-  base_class->handshake_thread_safe_renegotiation_status = g_tls_connection_openssl_handshake_thread_safe_renegotiation_status;
-  base_class->handshake_thread_request_rehandshake       = g_tls_connection_openssl_handshake_thread_request_rehandshake;
   base_class->handshake_thread_handshake                 = g_tls_connection_openssl_handshake_thread_handshake;
   base_class->retrieve_peer_certificate                  = g_tls_connection_openssl_retrieve_peer_certificate;
   base_class->get_channel_binding_data                   = g_tls_connection_openssl_get_channel_binding_data;

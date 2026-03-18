@@ -1,13 +1,13 @@
 foreach program: proxy_test_programs
-  test_conf = configuration_data()
-  test_conf.set('installed_tests_dir', installed_tests_execdir)
-  test_conf.set('program', program[0])
-  test_conf.set('environment', 'GIO_PROXY_TEST_NAME=' + program[1])
-
   test_name = program[0]
   if program[0] != program[1]
     test_name = program[0] + '-' + program[1]
   endif
+
+  test_conf = configuration_data()
+  test_conf.set('installed_tests_dir', installed_tests_execdir)
+  test_conf.set('program', test_name)
+  test_conf.set('environment', 'GIO_PROXY_TEST_NAME=' + program[1])
 
   if enable_installed_tests
     configure_file(
@@ -18,9 +18,16 @@ foreach program: proxy_test_programs
     )
   endif
 
+  c_flags = []
+
+  if libproxy_dep.version() >= '0.5.0'
+    c_flags += '-DLIBPROXY_0_5'
+  endif
+
   exe = executable(
     test_name,
     program[0] + '.c',
+    c_args : c_flags,
     include_directories: top_inc,
     dependencies: program[2],
     install: enable_installed_tests,

@@ -72,9 +72,9 @@ enum
 static void     g_tls_certificate_openssl_initable_iface_init (GInitableIface  *iface);
 static gboolean is_issuer (GTlsCertificateOpenssl *cert, GTlsCertificateOpenssl *issuer);
 
-G_DEFINE_TYPE_WITH_CODE (GTlsCertificateOpenssl, g_tls_certificate_openssl, G_TYPE_TLS_CERTIFICATE,
-                         G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
-                                                g_tls_certificate_openssl_initable_iface_init))
+G_DEFINE_FINAL_TYPE_WITH_CODE (GTlsCertificateOpenssl, g_tls_certificate_openssl, G_TYPE_TLS_CERTIFICATE,
+                               G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE,
+                                                      g_tls_certificate_openssl_initable_iface_init))
 
 static void
 g_tls_certificate_openssl_finalize (GObject *object)
@@ -166,6 +166,9 @@ export_privkey_to_der (GTlsCertificateOpenssl  *openssl,
     goto err;
 
   bio = BIO_new (BIO_s_mem ());
+  if (!bio)
+    goto err;
+
   if (i2d_PKCS8_PRIV_KEY_INFO_bio (bio, pkcs8) == 0)
     goto err;
 
@@ -199,6 +202,9 @@ export_privkey_to_pem (GTlsCertificateOpenssl *openssl)
     return NULL;
 
   bio = BIO_new (BIO_s_mem ());
+  if (!bio)
+    goto out;
+
   ret = PEM_write_bio_PKCS8PrivateKey (bio, openssl->key, NULL, NULL, 0, NULL, NULL);
   if (ret == 0)
     goto out;
@@ -211,7 +217,7 @@ export_privkey_to_pem (GTlsCertificateOpenssl *openssl)
   result = g_strdup (data);
 
 out:
-  BIO_free_all (bio);
+  g_clear_pointer (&bio, BIO_free_all);
   return result;
 }
 
@@ -232,6 +238,9 @@ maybe_import_pkcs12 (GTlsCertificateOpenssl *openssl)
     return;
 
   bio = BIO_new (BIO_s_mem ());
+  if (!bio)
+    goto import_failed;
+
   status = BIO_write (bio, openssl->pkcs12_data->data, openssl->pkcs12_data->len);
   if (status <= 0)
     goto import_failed;
@@ -323,7 +332,7 @@ g_tls_certificate_openssl_get_property (GObject    *object,
   guint8 *data;
   BIO *bio;
   GByteArray *byte_array;
-  char *certificate_pem;
+  const char *certificate_pem;
   long size;
 
   const ASN1_TIME *time_asn1;
@@ -362,15 +371,12 @@ g_tls_certificate_openssl_get_property (GObject    *object,
     case PROP_CERTIFICATE_PEM:
       bio = BIO_new (BIO_s_mem ());
 
-      if (!PEM_write_bio_X509 (bio, openssl->cert) || !BIO_write (bio, "\0", 1))
-        certificate_pem = NULL;
-      else
+      if (bio && PEM_write_bio_X509 (bio, openssl->cert) == 1 && BIO_write (bio, "\0", 1) == 1)
         {
           BIO_get_mem_data (bio, &certificate_pem);
           g_value_set_string (value, certificate_pem);
-
-          BIO_free_all (bio);
         }
+      g_clear_pointer (&bio, BIO_free_all);
       break;
 
     case PROP_PRIVATE_KEY:
@@ -410,9 +416,15 @@ g_tls_certificate_openssl_get_property (GObject    *object,
 
     case PROP_SUBJECT_NAME:
       bio = BIO_new (BIO_s_mem ());
+      if (!bio)
+        break;
       name = X509_get_subject_name (openssl->cert);
-      X509_NAME_print_ex (bio, name, 0, XN_FLAG_SEP_COMMA_PLUS);
-      BIO_write (bio, "\0", 1);
+      if (X509_NAME_print_ex (bio, name, 0, XN_FLAG_SEP_COMMA_PLUS) < 0 ||
+          BIO_write (bio, "\0", 1) != 1)
+        {
+          BIO_free_all (bio);
+          break;
+        }
       BIO_get_mem_data (bio, (char **)&name_string);
       g_value_set_string (value, name_string);
       BIO_free_all (bio);
@@ -420,10 +432,16 @@ g_tls_certificate_openssl_get_property (GObject    *object,
 
     case PROP_ISSUER_NAME:
       bio = BIO_new (BIO_s_mem ());
+      if (!bio)
+        break;
       name = X509_get_issuer_name (openssl->cert);
-      X509_NAME_print_ex (bio, name, 0, XN_FLAG_SEP_COMMA_PLUS);
-      BIO_write (bio, "\0", 1);
-      BIO_get_mem_data (bio, &name_string);
+      if (X509_NAME_print_ex (bio, name, 0, XN_FLAG_SEP_COMMA_PLUS) < 0 ||
+          BIO_write (bio, "\0", 1) != 1)
+        {
+          BIO_free_all (bio);
+          break;
+        }
+      BIO_get_mem_data (bio, (char **)&name_string);
       g_value_set_string (value, name_string);
       BIO_free_all (bio);
       break;
@@ -528,8 +546,11 @@ g_tls_certificate_openssl_set_property (GObject      *object,
         break;
       CRITICAL_IF_CERTIFICATE_INITIALIZED ("certificate-pem");
       bio = BIO_new_mem_buf ((gpointer)string, -1);
-      openssl->cert = PEM_read_bio_X509 (bio, NULL, NULL, NULL);
-      BIO_free (bio);
+      if (bio)
+        {
+          openssl->cert = PEM_read_bio_X509 (bio, NULL, NULL, NULL);
+          BIO_free (bio);
+        }
       if (openssl->cert)
         openssl->have_cert = TRUE;
       else if (!openssl->construct_error)
@@ -549,8 +570,11 @@ g_tls_certificate_openssl_set_property (GObject      *object,
       CRITICAL_IF_KEY_INITIALIZED ("private-key");
 
       bio = BIO_new_mem_buf (bytes->data, bytes->len);
-      openssl->key = d2i_PrivateKey_bio (bio, NULL);
-      BIO_free (bio);
+      if (bio)
+        {
+          openssl->key = d2i_PrivateKey_bio (bio, NULL);
+          BIO_free (bio);
+        }
       if (openssl->key)
         openssl->have_key = TRUE;
       else if (!openssl->construct_error)
@@ -570,8 +594,11 @@ g_tls_certificate_openssl_set_property (GObject      *object,
       CRITICAL_IF_KEY_INITIALIZED ("private-key-pem");
 
       bio = BIO_new_mem_buf ((gpointer)string, -1);
-      openssl->key = PEM_read_bio_PrivateKey (bio, NULL, NULL, NULL);
-      BIO_free (bio);
+      if (bio)
+        {
+          openssl->key = PEM_read_bio_PrivateKey (bio, NULL, NULL, NULL);
+          BIO_free (bio);
+        }
       if (openssl->key)
         openssl->have_key = TRUE;
       else if (!openssl->construct_error)

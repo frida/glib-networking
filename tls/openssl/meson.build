@@ -23,7 +23,11 @@ deps = [
   tlsbase_dep,
 ]
 
-if host_system == 'windows'
+if ['darwin', 'ios'].contains(host_system)
+  deps += [
+    security_dep,
+  ]
+elif ['windows'].contains(host_system)
   deps += [
     crypt32_dep,
   ]
@@ -50,33 +54,9 @@ if build_static
     install: true,
     install_dir: gio_module_dir,
   )
+  pkg.generate(module)
 
-  uninstalled_vapidir = meson.current_source_dir()
-  uninstalled_variables = {
-    'vapidir': uninstalled_vapidir,
-  }
-  installed_vapidir = get_option('prefix') / get_option('datadir') / 'vala' / 'vapi'
-  installed_variables = {
-    'vapidir': installed_vapidir,
-  }
-
-  pkg.generate(filebase: 'gioopenssl',
-    name: 'gioopenssl',
-    version: meson.project_version(),
-    description: 'Network-related GIO module for GLib using OpenSSL',
-    requires: ['glib-2.0', 'gobject-2.0', 'gio-2.0'],
-    libraries: [gioopenssl_lib],
-    variables: installed_variables,
-    uninstalled_variables: uninstalled_variables,
-  )
-  install_headers(['gioopenssl.h'])
-  install_data(['gioopenssl.vapi'], install_dir: installed_vapidir)
-
-  gioopenssl_dep = declare_dependency(
-    include_directories: include_directories('.'),
-    link_with: gioopenssl_lib,
-    variables: uninstalled_variables,
-  )
+  gioopenssl_dep = declare_dependency(link_with: gioopenssl_lib)
   meson.override_dependency('gioopenssl', gioopenssl_dep)
 endif
 

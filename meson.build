@@ -1,6 +1,6 @@
 project(
   'glib-networking', 'c',
-  version: '2.74.0',
+  version: '2.80.0.97',
   license: 'LGPL2.1+',
   meson_version: '>= 0.60.0',
   default_options: ['c_std=gnu99']
@@ -33,26 +33,7 @@ common_flags = [
   '-DGLIB_VERSION_MIN_REQUIRED=GLIB_VERSION_2_70'
 ]
 
-# old versions of glibc require this for resolv.h, which gets included by gio/gnetworking.h
-if host_system == 'linux'
-  common_flags += '-D_GNU_SOURCE'
-endif
-
-# ...and same story for QNX
-if host_system == 'qnx'
-  common_flags += '-D_QNX_SOURCE'
-endif
-
-ndebug = get_option('b_ndebug')
-if ndebug == 'true' or (ndebug == 'if-release' and not get_option('debug'))
-  common_flags += [
-    '-DG_DISABLE_CAST_CHECKS',
-    '-DG_DISABLE_ASSERT',
-    '-DG_DISABLE_CHECKS'
-  ]
-endif
-
-build_static = get_option('static_modules') or get_option('default_library') != 'shared'
+build_static = get_option('default_library') != 'shared'
 build_shared = get_option('default_library') != 'static'
 if build_static and build_shared and (host_system == 'windows' or host_system == 'cygwin')
   error('On Windows default_library must be "shared" or "static" but not "both"')
@@ -77,23 +58,13 @@ if host_system.contains('linux') or host_system == 'android'
 endif
 
 # *** Check GLib GIO        ***
-glib_dep = dependency('glib-2.0', version: '>= 2.73.3',
-  fallback: ['glib', 'libglib_dep'])
-gio_dep = dependency('gio-2.0',
-  fallback: ['glib', 'libgio_dep'])
-gobject_dep = dependency('gobject-2.0',
-  fallback: ['glib', 'libgobject_dep'])
-gmodule_dep = dependency('gmodule-2.0',
-  fallback: ['glib', 'libgmodule_dep'])
+glib_dep = dependency('glib-2.0', version: '>= 2.73.3')
+gio_dep = dependency('gio-2.0')
+gobject_dep = dependency('gobject-2.0')
+gmodule_dep = dependency('gmodule-2.0')
 
-if glib_dep.type_name() == 'internal'
-  glib_proj = subproject('glib')
-  gio_module_dir = glib_proj.get_variable('glib_giomodulesdir')
-else
-  gio_module_dir = gio_dep.get_variable('giomoduledir',
-                                         pkgconfig_define: ['libdir', join_paths(prefix, libdir)])
-endif
-
+gio_module_dir = gio_dep.get_variable('giomoduledir',
+                                       pkgconfig_define: ['libdir', join_paths(prefix, libdir)])
 assert(gio_module_dir != '', 'GIO_MODULE_DIR is missing from gio-2.0.pc')
 
 # *** Checks for LibProxy   ***
@@ -113,6 +84,10 @@ gnutls_dep = dependency('gnutls', version: '>= 3.7.4', required: get_option('gnu
 
 if gnutls_dep.found()
   backends += ['gnutls']
+  # test-specific, maybe move to tls/tests
+  if cc.has_function('gnutls_pkcs11_init', prefix: '#include <gnutls/pkcs11.h>', dependencies: gnutls_dep)
+    config_h.set10('HAVE_GNUTLS_PKCS11', true)
+  endif
 endif
 
 # *** Checks for OpenSSL    ***

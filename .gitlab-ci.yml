@@ -1,16 +1,24 @@
 include:
- - remote: 'https://gitlab.freedesktop.org/freedesktop/ci-templates/-/raw/c5626190ec14b475271288dda7a7dae8dbe0cd76/templates/fedora.yml'
+ - project: 'Infrastructure/freedesktop-ci-templates'
+   file: 'templates/fedora.yml'
+   ref: '5cc6ded703fc990f9d055f0d948ffd4460a9ca40'
+ - component: gitlab.gnome.org/GNOME/citemplates/release-service@master
+   inputs:
+     dist-job-name: "fedora-x86_64-dist"
+     tarball-artifact-path: "${TARBALL_ARTIFACT_PATH}"
 
 variables:
   FDO_UPSTREAM_REPO: GNOME/glib-networking
+  TARBALL_ARTIFACT_PATH: "_build/meson-dist/${CI_PROJECT_NAME}-${CI_COMMIT_TAG}.tar.xz"
 
 stages:
   - prepare
   - build
+  - deploy
 
 .fedora.container.common:
   variables:
-    FDO_DISTRIBUTION_TAG: '2022-08-05.3'
+    FDO_DISTRIBUTION_TAG: '2026-02-23.0'
     FDO_DISTRIBUTION_VERSION: 'latest'
 
 build.container.fedora@x86_64:
@@ -30,11 +38,11 @@ build.container.fedora@x86_64:
       lcov
       libasan
       meson
-      pkgconfig(gnutls)
-      pkgconfig(gsettings-desktop-schemas)
-      pkgconfig(libproxy-1.0)
-      pkgconfig(openssl)
-      pkgconfig(p11-kit-1)
+      'pkgconfig(gnutls)'
+      'pkgconfig(gsettings-desktop-schemas)'
+      'pkgconfig(libproxy-1.0)'
+      'pkgconfig(openssl)'
+      'pkgconfig(p11-kit-1)'
     FDO_DISTRIBUTION_EXEC: >-
       git clone --depth=1 https://gitlab.gnome.org/GNOME/glib.git &&
       pushd glib &&
@@ -69,12 +77,16 @@ fedora-x86_64:
     - meson install -C _build/
     - ninja -C _build/ coverage-html
   artifacts:
+    reports:
+      junit: _build/meson-logs/testlog.junit.xml
     paths:
       - _build/test-results
       - _build/meson-logs/coveragereport
     when: always
   coverage: '/^\s+lines\.+:\s+([\d.]+\%)\s+/'
 
+# FIXME: This uses -Dlibproxy=disabled due to leaks in libproxy:
+#   https://github.com/libproxy/libproxy/pull/357
 fedora-x86_64-asan:
   extends:
     - '.fdo.distribution-image@fedora'
@@ -88,7 +100,7 @@ fedora-x86_64-asan:
     - meson -Db_sanitize=address
             -Dgnutls=enabled
             -Dopenssl=enabled
-            -Dlibproxy=enabled
+            -Dlibproxy=disabled
             -Denvironment_proxy=enabled
             -Dgnome_proxy=enabled
             -Ddebug_logs=true
@@ -97,6 +109,8 @@ fedora-x86_64-asan:
     - meson compile -C _build/
     - meson test --verbose --timeout-multiplier=10 -C _build/
   artifacts:
+    reports:
+      junit: _build/meson-logs/testlog.junit.xml
     paths:
       - _build/test-results
     when: on_failure
@@ -122,6 +136,22 @@ fedora-x86_64-scan-build:
       - _build/meson-logs/scanbuild
     when: on_failure
 
+fedora-x86_64-dist:
+  extends:
+    - '.fdo.distribution-image@fedora'
+    - '.fedora.container.common'
+  stage: build
+  script:
+    - meson setup _build/
+    - meson dist --no-tests -C _build/
+  artifacts:
+    name: "${CI_JOB_NAME}-${CI_COMMIT_REF_NAME}"
+    when: "always"
+    paths:
+      - "${TARBALL_ARTIFACT_PATH}"
+  rules:
+    - if: $CI_COMMIT_TAG && $CI_COMMIT_REF_PROTECTED
+
 vs2017-x64:
   stage: build
   except:
@@ -129,8 +159,14 @@ vs2017-x64:
   tags:
     - win32-ps
   script:
-    - .gitlab-ci/test-msvc.bat
+    - pip3 install --upgrade --user meson~=0.64.0
+    - mv .gitlab-ci\openssl.wrap subprojects
+    - meson setup --vsenv builddir -Dgnutls=disabled -Dopenssl=enabled -Dlibproxy=disabled -Denvironment_proxy=enabled -Dgnome_proxy=disabled -Ddebug_logs=true -Dopenssl:default_library=static
+    - meson compile -C builddir
+    - meson test -C builddir 'glib-networking:' --timeout-multiplier=10
   artifacts:
+    reports:
+      junit: builddir\meson-logs\testlog.junit.xml
     paths:
-      - build/test-results
+      - builddir\test-results
     when: on_failure

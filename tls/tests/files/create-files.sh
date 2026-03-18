@@ -40,13 +40,6 @@ msg "Creating CA certificate"
 openssl req -x509 -new -config ssl/ca.conf -days 10950 -key ca-key.pem -out ca.pem
 
 #######################################################################
-### New Root CA with OCSP MustStaple
-#######################################################################
-
-msg "Creating CA (OCSP) certificate"
-openssl req -x509 -new -config ssl/ca.conf -addext tlsfeature=status_request -days 10950 -key ca-key.pem -out ca-ocsp.pem
-
-#######################################################################
 ### New Root CA, issued by Obsolete/Untrusted Root CA
 #######################################################################
 
@@ -86,28 +79,6 @@ openssl rsa -in server-key.pem -outform DER -out server-key.der
 msg "Converting server private key to PKCS #8"
 openssl pkcs8 -topk8 -in server-key.pem -outform PEM -nocrypt -out server-key-pkcs8.pem
 openssl pkcs8 -topk8 -in server-key.pem -outform DER -nocrypt -out server-key-pkcs8.der
-
-#######################################################################
-### Server (OCSP required by CA)
-#######################################################################
-
-msg "Creating server (OCSP required by CA) certificate"
-openssl x509 -req -in server-csr.pem -days 9125 -CA ca-ocsp.pem -CAkey ca-key.pem -CAserial serial -extfile ssl/server.conf -extensions v3_req_ext -out server-ocsp-required-by-ca.pem
-
-msg "Concatenating server (OCSP required by CA) certificate and private key into a single file"
-cat server-ocsp-required-by-ca.pem > server-ocsp-required-by-ca-and-key.pem
-cat server-key.pem >> server-ocsp-required-by-ca-and-key.pem
-
-#######################################################################
-### Server (OCSP required by server)
-#######################################################################
-
-msg "Creating server (OCSP required by server) certificate"
-openssl x509 -req -in server-csr.pem -days 9125 -CA ca.pem -CAkey ca-key.pem -CAserial serial -extfile ssl/server-muststaple.conf -extensions v3_req_ext -out server-ocsp-required-by-server.pem
-
-msg "Concatenating server (OCSP required by server) certificate and private key into a single file"
-cat server-ocsp-required-by-server.pem > server-ocsp-required-by-server-and-key.pem
-cat server-key.pem >> server-ocsp-required-by-server-and-key.pem
 
 #######################################################################
 ### Server (self-signed)

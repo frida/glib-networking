@@ -19,7 +19,7 @@ header = '''/* This file is generated from update-certificate-test.py */
 
 #define EXPECTED_NOT_VALID_BEFORE "{}Z"
 #define EXPECTED_NOT_VALID_AFTER "{}Z"
-'''.format(cert.not_valid_before.isoformat(), cert.not_valid_after.isoformat())
+'''.format(cert.not_valid_before_utc.replace(tzinfo=None).isoformat(), cert.not_valid_after_utc.replace(tzinfo=None).isoformat())
 
 with open(out_path, 'w') as out_file:
     out_file.write(header)
