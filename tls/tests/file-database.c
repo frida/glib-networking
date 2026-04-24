@@ -467,6 +467,47 @@ certificate_is_in_list (GList *certificates,
 }
 
 static void
+test_lookup_certificate_issuer (TestFileDatabase *test,
+                                gconstpointer     unused)
+{
+  GTlsCertificate *issuer;
+  GTlsCertificate *cert_signed_by_ca;
+  GTlsCertificate *ca_in_database;
+  GTlsCertificate *cert_with_unknown_issuer;
+  GError *error = NULL;
+
+  cert_signed_by_ca = g_tls_certificate_new_from_file (tls_test_file_path ("client.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_true (G_IS_TLS_CERTIFICATE (cert_signed_by_ca));
+
+  ca_in_database = g_tls_certificate_new_from_file (tls_test_file_path ("ca.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_true (G_IS_TLS_CERTIFICATE (ca_in_database));
+
+  issuer = g_tls_database_lookup_certificate_issuer (test->database, cert_signed_by_ca, NULL,
+                                                     G_TLS_DATABASE_LOOKUP_NONE,
+                                                     NULL, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (issuer);
+  g_assert_true (g_tls_certificate_is_same (issuer, ca_in_database));
+  g_object_unref (issuer);
+
+  cert_with_unknown_issuer = g_tls_certificate_new_from_file (tls_test_file_path ("server-self.pem"), &error);
+  g_assert_no_error (error);
+  g_assert_true (G_IS_TLS_CERTIFICATE (cert_with_unknown_issuer));
+
+  issuer = g_tls_database_lookup_certificate_issuer (test->database, cert_with_unknown_issuer, NULL,
+                                                     G_TLS_DATABASE_LOOKUP_NONE,
+                                                     NULL, &error);
+  g_assert_no_error (error);
+  g_assert_null (issuer);
+
+  g_object_unref (cert_with_unknown_issuer);
+  g_object_unref (ca_in_database);
+  g_object_unref (cert_signed_by_ca);
+}
+
+static void
 test_lookup_certificates_issued_by (void)
 {
   /* This data is generated from the update-test-database.py script */
@@ -552,6 +593,8 @@ main (int   argc,
 
   g_test_add_func ("/tls/" BACKEND "/file-database/anchors-property",
                    test_anchors_property);
+  g_test_add ("/tls/" BACKEND "/file-database/lookup-certificate-issuer", TestFileDatabase, NULL,
+              setup_file_database, test_lookup_certificate_issuer, teardown_file_database);
   g_test_add_func ("/tls/" BACKEND "/file-database/lookup-certificates-issued-by",
                    test_lookup_certificates_issued_by);
 

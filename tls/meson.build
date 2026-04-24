@@ -12,6 +12,10 @@ if backends.contains('openssl')
   subdir('openssl')
 endif
 
+if backends.contains('apple')
+  subdir('apple')
+endif
+
 if get_option('tests')
   subdir('tests')
 endif

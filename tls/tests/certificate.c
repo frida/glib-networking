@@ -344,6 +344,63 @@ test_private_key_pkcs11 (TestCertificate *test,
 }
 
 static void
+assert_private_key_pem_roundtrip (const gchar *filename)
+{
+  GTlsCertificate *cert;
+  GTlsCertificate *reloaded;
+  GByteArray *der = NULL;
+  GByteArray *der_after = NULL;
+  gchar *key_pem = NULL;
+  gchar *cert_pem = NULL;
+  gchar *combined;
+  GError *error = NULL;
+
+  cert = g_tls_certificate_new_from_file (tls_test_file_path (filename), &error);
+  g_assert_no_error (error);
+  g_assert_true (G_IS_TLS_CERTIFICATE (cert));
+
+  g_object_get (cert,
+                "certificate-pem", &cert_pem,
+                "private-key", &der,
+                "private-key-pem", &key_pem,
+                NULL);
+  g_assert_nonnull (cert_pem);
+  g_assert_nonnull (key_pem);
+  g_assert_nonnull (der);
+  g_assert_cmpuint (der->len, >, 0);
+  g_assert_nonnull (strstr (key_pem, "-----BEGIN PRIVATE KEY-----"));
+
+  combined = g_strconcat (cert_pem, key_pem, NULL);
+  reloaded = g_tls_certificate_new_from_pem (combined, -1, &error);
+  g_assert_no_error (error);
+  g_assert_true (G_IS_TLS_CERTIFICATE (reloaded));
+
+  g_object_get (reloaded, "private-key", &der_after, NULL);
+  g_assert_nonnull (der_after);
+  g_assert_cmpmem (der->data, der->len, der_after->data, der_after->len);
+
+  g_byte_array_unref (der);
+  g_byte_array_unref (der_after);
+  g_free (key_pem);
+  g_free (cert_pem);
+  g_free (combined);
+  g_object_unref (reloaded);
+  g_object_unref (cert);
+}
+
+static void
+test_private_key_ec_roundtrip (void)
+{
+  assert_private_key_pem_roundtrip ("server-ec-and-key.pem");
+}
+
+static void
+test_private_key_ed25519_roundtrip (void)
+{
+  assert_private_key_pem_roundtrip ("server-ed25519-and-key.pem");
+}
+
+static void
 test_create_certificate_chain (void)
 {
   GTlsCertificate *cert, *intermediate, *root;
@@ -948,6 +1005,8 @@ main (int   argc,
               setup_certificate, test_private_key, teardown_certificate);
   g_test_add ("/tls/" BACKEND "/certificate/private-key-pkcs11", TestCertificate, NULL,
               setup_certificate, test_private_key_pkcs11, teardown_certificate);
+  g_test_add_func ("/tls/" BACKEND "/certificate/private-key-ec-roundtrip", test_private_key_ec_roundtrip);
+  g_test_add_func ("/tls/" BACKEND "/certificate/private-key-ed25519-roundtrip", test_private_key_ed25519_roundtrip);
 
   g_test_add_func ("/tls/" BACKEND "/certificate/create-chain", test_create_certificate_chain);
   g_test_add_func ("/tls/" BACKEND "/certificate/create-no-chain", test_create_certificate_no_chain);

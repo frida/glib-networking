@@ -36,7 +36,7 @@
 #ifdef BACKEND_IS_GNUTLS
 #include <gnutls/gnutls.h>
 #include <gnutls/pkcs11.h>
-#else
+#elif defined(BACKEND_IS_OPENSSL)
 #include "openssl-include.h"
 #endif
 
@@ -173,9 +173,14 @@ teardown_connection (TestConnection *test, gconstpointer data)
   if (test->service)
     {
       g_socket_service_stop (test->service);
-      /* The outstanding accept_async will hold a ref on test->service,
-       * which we want to wait for it to release if we're valgrinding.
+      /* Drain the accept cancellable so the listener's accept source is
+       * removed before we close its fd; otherwise the next iteration polls
+       * an invalid fd and trips GLib's poll EBADF warning. The outstanding
+       * accept_async also holds a ref on test->service that we want to wait
+       * for it to release if we're valgrinding.
        */
+      while (g_main_context_iteration (NULL, FALSE))
+        ;
       g_socket_listener_close (G_SOCKET_LISTENER (test->service));
       WAIT_UNTIL_UNREFFED (test->service);
       g_object_unref (test->service);
@@ -707,6 +712,11 @@ test_connection_session_resume_multiple_times (TestConnection *test,
   GTlsCertificate *cert;
   GSocketClient *client;
   gboolean reused = FALSE;
+
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework does not expose whether a session was resumed");
+  return;
+#endif
 
   test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
   g_assert_no_error (error);
@@ -1474,6 +1484,10 @@ static void
 test_client_auth_rehandshake (TestConnection *test,
                               gconstpointer   data)
 {
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework does not support TLS rehandshake");
+  return;
+#endif
   test->rehandshake = TRUE;
   test_client_auth_connection (test, data);
 }
@@ -1632,7 +1646,7 @@ test_client_auth_fail_missing_client_private_key (TestConnection *test,
 #endif
 
   g_assert_error (test->read_error, G_TLS_ERROR, G_TLS_ERROR_CERTIFICATE_REQUIRED);
-#if BACKEND_IS_OPENSSL
+#if defined(BACKEND_IS_OPENSSL) || defined(BACKEND_IS_APPLE)
   g_assert_error (test->server_error, G_TLS_ERROR, G_TLS_ERROR_CERTIFICATE_REQUIRED);
 #else
   g_assert_error (test->server_error, G_TLS_ERROR, G_TLS_ERROR_NOT_TLS);
@@ -2057,6 +2071,11 @@ test_connection_read_time_out_write (TestConnection *test,
   GIOStream *base;
   GError *error = NULL;
 
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework uses its own dispatch-based reads that do not honor GSocket timeouts");
+  return;
+#endif
+
   /* Don't close the server connection after writing TEST_DATA. */
   start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, WRITE_THEN_WAIT);
   client = g_socket_client_new ();
@@ -2188,6 +2207,10 @@ static void
 test_simultaneous_async_rehandshake (TestConnection *test,
                                      gconstpointer   data)
 {
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework does not support TLS rehandshake");
+  return;
+#endif
   test->rehandshake = TRUE;
   test_simultaneous_async (test, data);
 }
@@ -2282,6 +2305,10 @@ static void
 test_simultaneous_sync_rehandshake (TestConnection *test,
                                     gconstpointer   data)
 {
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework does not support TLS rehandshake");
+  return;
+#endif
   test->rehandshake = TRUE;
   test_simultaneous_sync (test, data);
 }
@@ -2337,6 +2364,10 @@ test_unclean_close_by_server (TestConnection *test,
   GTlsConnection *client_connection;
   gssize nread;
 
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework uses its own fd, so it does not observe the base iostream being closed externally");
+  return;
+#endif
   start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, HANDSHAKE_ONLY);
   client = g_socket_client_new ();
   g_socket_client_set_tls (client, TRUE);
@@ -2505,6 +2536,11 @@ test_output_stream_close (TestConnection *test,
   gboolean ret;
   gboolean handshake_complete = FALSE;
   gssize size;
+
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework does not support half-closing a TLS connection");
+  return;
+#endif
 
 #ifdef BACKEND_IS_OPENSSL
 # if OPENSSL_VERSION_NUMBER >= 0x10101000L
@@ -2702,6 +2738,10 @@ test_alpn_no_match (TestConnection *test,
   const char * const client_protocols[] = { "one", "two", "three", NULL };
   const char * const server_protocols[] = { "four", "seven", "nine", NULL };
 
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework treats ALPN mismatch as a fatal alert (RFC 7301)");
+  return;
+#endif
   test_alpn (test, client_protocols, server_protocols, NULL);
 }
 
@@ -2790,6 +2830,11 @@ test_socket_timeout (TestConnection *test,
   GSocketClient *client;
   GError *error = NULL;
 
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework uses its own dispatch-based reads that do not honor GSocket timeouts");
+  return;
+#endif
+
   test->incoming_connection_delay = (gulong)(1.5 * G_USEC_PER_SEC);
 
   start_async_server_service (test, G_TLS_AUTHENTICATION_NONE, WRITE_THEN_CLOSE);
@@ -2830,6 +2875,11 @@ test_connection_binding_match_tls_unique (TestConnection *test,
   gboolean client_supports_tls_unique;
   gboolean server_supports_tls_unique;
   GError *error = NULL;
+
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework does not expose channel binding data");
+  return;
+#endif
 
   test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
   g_assert_no_error (error);
@@ -2920,6 +2970,11 @@ test_connection_binding_match_tls_server_end_point (TestConnection *test,
   gchar *client_b64, *server_b64;
   GError *error = NULL;
 
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework does not expose channel binding data");
+  return;
+#endif
+
   test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
   g_assert_no_error (error);
   g_assert_nonnull (test->database);
@@ -2990,6 +3045,11 @@ test_connection_binding_match_tls_exporter (TestConnection *test,
   GError *error = NULL;
   gboolean client_supports_tls_exporter;
   gboolean server_supports_tls_exporter;
+
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework does not expose channel binding data");
+  return;
+#endif
 
   test->database = g_tls_file_database_new (tls_test_file_path ("ca-roots.pem"), &error);
   g_assert_no_error (error);
@@ -3263,6 +3323,11 @@ test_connection_oscp_must_staple (TestConnection *test,
   GIOStream *connection;
   GError *error = NULL;
 
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework does not expose OCSP Must-Staple enforcement to the application");
+  return;
+#endif
+
   test->database = g_tls_file_database_new (tls_test_file_path ("ca.pem"), &error);
   g_assert_no_error (error);
   g_assert_nonnull (test->database);
@@ -3312,6 +3377,10 @@ test_connection_oscp_must_staple_intermediate_certificate (TestConnection *test,
 
 #ifdef BACKEND_IS_OPENSSL
   g_test_skip ("OCSP Must-Staple on intermediate certificates is not supported with the OpenSSL backend");
+  return;
+#endif
+#ifdef BACKEND_IS_APPLE
+  g_test_skip ("Apple's Network.framework does not expose OCSP Must-Staple enforcement to the application");
   return;
 #endif
 

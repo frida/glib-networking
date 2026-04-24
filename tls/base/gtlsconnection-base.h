@@ -141,6 +141,12 @@ struct _GTlsConnectionBaseClass
                                                              gint64                timeout,
                                                              GCancellable         *cancellable,
                                                              GError              **error);
+
+  gboolean                    (*base_check)                 (GTlsConnectionBase   *tls,
+                                                             GIOCondition          condition);
+  GSource                    *(*create_base_source)         (GTlsConnectionBase   *tls,
+                                                             GIOCondition          condition,
+                                                             GCancellable         *cancellable);
 };
 
 gboolean                  g_tls_connection_base_handshake_thread_verify_certificate

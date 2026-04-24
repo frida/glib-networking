@@ -135,6 +135,34 @@ else
   endif
 endif
 
+apple_option = get_option('apple')
+apple_platforms = ['darwin', 'ios', 'tvos', 'watchos']
+if apple_platforms.contains(host_system) and not apple_option.disabled()
+  apple_deployment_check = '''
+#include <Availability.h>
+#if defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED < 150000
+# error macOS deployment target below 15.0
+#endif
+#if defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && __IPHONE_OS_VERSION_MIN_REQUIRED < 180000
+# error iOS deployment target below 18.0
+#endif
+#if defined(__TV_OS_VERSION_MIN_REQUIRED) && __TV_OS_VERSION_MIN_REQUIRED < 180000
+# error tvOS deployment target below 18.0
+#endif
+#if defined(__WATCH_OS_VERSION_MIN_REQUIRED) && __WATCH_OS_VERSION_MIN_REQUIRED < 110000
+# error watchOS deployment target below 11.0
+#endif
+int main (void) { return 0; }
+'''
+  if cc.compiles(apple_deployment_check, name: 'Apple TLS backend deployment target')
+    backends += ['apple']
+  elif apple_option.enabled()
+    error('Apple TLS backend requires macOS 15, iOS 18, tvOS 18 or watchOS 11')
+  endif
+elif apple_option.enabled()
+  error('Apple TLS backend only supports Apple host systems')
+endif
+
 if backends.length() == 0
   error('No TLS backends enabled. Please enable at least one TLS backend')
 endif

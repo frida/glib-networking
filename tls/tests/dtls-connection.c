@@ -699,6 +699,18 @@ test_basic_connection (TestConnection *test,
   GDatagramBased *connection;
   GError *error = NULL;
 
+#ifdef BACKEND_IS_APPLE
+  if (test->test_data->server_loss_inducer != NULL)
+    {
+      g_test_skip ("Apple's nw_connection does not re-emit the server flight "
+                   "on a duplicate ClientHello (nor on a standalone "
+                   "retransmit timer) when it is built via "
+                   "nw_connection_create_with_connected_socket_and_parameters "
+                   "in server mode");
+      return;
+    }
+#endif
+
   connection = start_server_and_connect_to_it (test, FALSE);
   test->client_connection = g_dtls_client_connection_new (connection, test->identity, &error);
   g_debug ("%s: Client connection %p on socket %p", G_STRFUNC, test->client_connection, connection);

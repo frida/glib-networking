@@ -954,9 +954,9 @@ g_tls_connection_base_pop_io (GTlsConnectionBase  *tls,
 
 /* Checks whether the underlying base stream or GDatagramBased meets
  * @condition. */
-gboolean
-g_tls_connection_base_base_check (GTlsConnectionBase *tls,
-                                  GIOCondition        condition)
+static gboolean
+g_tls_connection_base_real_base_check (GTlsConnectionBase *tls,
+                                       GIOCondition        condition)
 {
   GTlsConnectionBasePrivate *priv = g_tls_connection_base_get_instance_private (tls);
 
@@ -971,6 +971,33 @@ g_tls_connection_base_base_check (GTlsConnectionBase *tls,
 
   g_assert_not_reached ();
   return FALSE;
+}
+
+gboolean
+g_tls_connection_base_base_check (GTlsConnectionBase *tls,
+                                  GIOCondition        condition)
+{
+  return G_TLS_CONNECTION_BASE_GET_CLASS (tls)->base_check (tls, condition);
+}
+
+static GSource *
+g_tls_connection_base_real_create_base_source (GTlsConnectionBase *tls,
+                                               GIOCondition        condition,
+                                               GCancellable       *cancellable)
+{
+  GTlsConnectionBasePrivate *priv = g_tls_connection_base_get_instance_private (tls);
+
+  if (g_tls_connection_base_is_dtls (tls))
+    return g_datagram_based_create_source (priv->base_socket, condition, cancellable);
+
+  if (condition & G_IO_IN)
+    return g_pollable_input_stream_create_source (priv->base_istream, cancellable);
+
+  if (condition & G_IO_OUT)
+    return g_pollable_output_stream_create_source (priv->base_ostream, cancellable);
+
+  g_assert_not_reached ();
+  return g_timeout_source_new (0);
 }
 
 /* Checks whether the (D)TLS stream meets @condition; not the underlying base
@@ -1066,12 +1093,8 @@ tls_source_sync (GTlsConnectionBaseSource *tls_source)
 
   if (op_waiting)
     tls_source->child_source = g_cancellable_source_new (priv->waiting_for_op);
-  else if (io_waiting && G_IS_DATAGRAM_BASED (tls_source->base))
-    tls_source->child_source = g_datagram_based_create_source (priv->base_socket, tls_source->condition, NULL);
-  else if (io_waiting && G_IS_POLLABLE_INPUT_STREAM (tls_source->base))
-    tls_source->child_source = g_pollable_input_stream_create_source (priv->base_istream, NULL);
-  else if (io_waiting && G_IS_POLLABLE_OUTPUT_STREAM (tls_source->base))
-    tls_source->child_source = g_pollable_output_stream_create_source (priv->base_ostream, NULL);
+  else if (io_waiting)
+    tls_source->child_source = G_TLS_CONNECTION_BASE_GET_CLASS (tls)->create_base_source (tls, tls_source->condition, NULL);
   else
     tls_source->child_source = g_timeout_source_new (0);
 
@@ -2955,6 +2978,8 @@ g_tls_connection_base_class_init (GTlsConnectionBaseClass *klass)
 
   klass->push_io = g_tls_connection_base_real_push_io;
   klass->pop_io = g_tls_connection_base_real_pop_io;
+  klass->base_check = g_tls_connection_base_real_base_check;
+  klass->create_base_source = g_tls_connection_base_real_create_base_source;
 
   g_object_class_install_property (gobject_class, PROP_SESSION_REUSED,
     g_param_spec_boolean ("session-reused",
