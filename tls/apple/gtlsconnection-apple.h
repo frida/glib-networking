@@ -55,6 +55,14 @@ int                   g_tls_connection_apple_setup_bounce_transport
 void                  g_tls_connection_apple_release_bounce_fd
                                                                  (GTlsConnectionApple *self,
                                                                   int                  apple_fd);
+gboolean              g_tls_connection_apple_setup_public_endpoint
+                                                                 (GTlsConnectionApple *self,
+                                                                  guint16             *out_port,
+                                                                  GError             **error);
+nw_connection_t       g_tls_connection_apple_listen_public_endpoint
+                                                                 (GTlsConnectionApple *self,
+                                                                  nw_parameters_t      parameters,
+                                                                  GError             **error);
 void                  g_tls_connection_apple_install_verify_block
                                                                  (GTlsConnectionApple   *self,
                                                                   sec_protocol_options_t options);
@@ -65,5 +73,6 @@ void                  g_tls_connection_apple_attach             (GTlsConnectionA
                                                                   nw_connection_t      connection);
 nw_connection_t       g_tls_connection_apple_get_nw_connection (GTlsConnectionApple *self);
 dispatch_queue_t      g_tls_connection_apple_get_queue         (GTlsConnectionApple *self);
+GWeakRef             *g_tls_connection_apple_get_weak_self     (GTlsConnectionApple *self);
 
 G_END_DECLS

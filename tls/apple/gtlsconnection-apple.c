@@ -19,6 +19,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -26,9 +28,6 @@
 #include <glib/gi18n-lib.h>
 
 #define TRANSFER_BUFFER_SIZE (64 * 1024)
-
-extern nw_connection_t nw_connection_create_with_connected_socket_and_parameters (int fd, nw_parameters_t parameters);
-extern void            nw_parameters_set_allow_joining_connected_fd (nw_parameters_t parameters, bool allow);
 
 typedef enum
 {
@@ -39,8 +38,10 @@ typedef enum
   STATE_CLOSED,
 } ConnectionState;
 
-typedef struct _StreamPump         StreamPump;
-typedef struct _DatagramPump DatagramPump;
+typedef struct _StreamPump      StreamPump;
+typedef struct _DatagramPump    DatagramPump;
+typedef struct _BridgePump      BridgePump;
+typedef struct _AppleBaseSource AppleBaseSource;
 
 typedef struct
 {
@@ -69,6 +70,7 @@ typedef struct
   sec_trust_t verify_trust;
   gboolean    verify_pending;
   gboolean    verify_accepted;
+  GWeakRef   *weak_self;
 
   gboolean is_dtls;
   GIOStream *base_iostream;
@@ -84,6 +86,12 @@ typedef struct
   GSocket *bounce_socket;
   GInputStream *bounce_istream;
   GOutputStream *bounce_ostream;
+  int public_listen_fd;
+  gboolean public_endpoint_pending;
+  nw_listener_t public_listener;
+
+  BridgePump *bridge_pump_forward;
+  BridgePump *bridge_pump_reverse;
 
   StreamPump *forward_stream_pump;
   StreamPump *reverse_stream_pump;
@@ -136,12 +144,33 @@ struct _DatagramPump
   gboolean stopped;
 };
 
-typedef struct
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+struct _BridgePump
 {
-  GSource                     source;
-  GTlsConnectionApple        *tls;
-  GIOCondition                condition;
-} AppleBaseSource;
+  int                src_fd;
+  int                dst_fd;
+  gboolean           is_datagram;
+  dispatch_queue_t   queue;
+  dispatch_source_t  read_src;
+  dispatch_source_t  write_src;
+  guint8            *buffer;
+  gsize              buffer_capacity;
+  gsize              buffer_offset;
+  gsize              buffer_length;
+  gboolean           read_suspended;
+  gboolean           stopped;
+  gboolean           stopping;
+  int                outstanding_sources;
+};
+#endif
+
+struct _AppleBaseSource
+{
+  GSource              source;
+  GTlsConnectionApple *tls;
+  GIOCondition         condition;
+  GMainContext        *attached_context;
+};
 
 static void                     g_tls_connection_apple_dispose           (GObject *object);
 static void                     g_tls_connection_apple_finalize          (GObject *object);
@@ -213,10 +242,6 @@ static gboolean drain_rx_queue_locked        (GTlsConnectionApplePrivate *priv,
                                               void                       *buffer,
                                               gsize                       count,
                                               gssize                     *nread);
-static gboolean drain_rx_datagram_locked     (GTlsConnectionApplePrivate *priv,
-                                              void                       *buffer,
-                                              gsize                       count,
-                                              gssize                     *nread);
 static void     release_rx_head_chunk_locked (GTlsConnectionApplePrivate *priv);
 static void     kick_receive_locked          (GTlsConnectionApple        *self);
 static void     handle_receive_completion    (GTlsConnectionApple        *self,
@@ -224,24 +249,20 @@ static void     handle_receive_completion    (GTlsConnectionApple        *self,
                                               nw_content_context_t        ctx,
                                               bool                        is_complete,
                                               nw_error_t                  nw_error);
+static gboolean drain_rx_datagram_locked     (GTlsConnectionApplePrivate *priv,
+                                              void                       *buffer,
+                                              gsize                       count,
+                                              gssize                     *nread);
 static void     handle_send_completion       (GTlsConnectionApple        *self,
                                               nw_error_t                  nw_error);
 
-static gboolean apple_base_source_prepare    (GSource *source, gint *timeout);
-static gboolean apple_base_source_check      (GSource *source);
-static gboolean apple_base_source_dispatch   (GSource *source, GSourceFunc callback, gpointer user_data);
-static void     apple_base_source_finalize   (GSource *source);
-static gboolean return_true                  (gpointer user_data);
-
-static GSourceFuncs apple_base_source_funcs =
-{
-  apple_base_source_prepare,
-  apple_base_source_check,
-  apple_base_source_dispatch,
-  apple_base_source_finalize,
-  NULL,
-  NULL,
-};
+static gboolean apple_base_source_prepare       (GSource *source, gint *timeout);
+static gboolean apple_base_source_check         (GSource *source);
+static gboolean apple_base_source_dispatch      (GSource *source, GSourceFunc callback, gpointer user_data);
+static void     apple_base_source_dispose       (GSource *source);
+static void     apple_base_source_finalize      (GSource *source);
+static gboolean return_true                     (gpointer user_data);
+static void     apple_base_source_cache_context (AppleBaseSource *s);
 
 static int      setup_tls_bounce_transport   (GTlsConnectionApple *self,
                                               GError             **error);
@@ -254,6 +275,66 @@ static gboolean make_udp_loopback_pair       (int     *out_apple_fd,
                                               int     *out_our_fd,
                                               GError **error);
 
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+static gboolean setup_public_tls_endpoint           (GTlsConnectionApple  *self,
+                                                     guint16              *out_port,
+                                                     GError              **error);
+static gboolean make_tcp_loopback_listener          (int     *out_listen_fd,
+                                                     guint16 *out_port,
+                                                     GError **error);
+static gboolean setup_public_dtls_endpoint          (GTlsConnectionApple  *self,
+                                                     guint16              *out_port,
+                                                     GError              **error);
+static gboolean make_udp_loopback_local             (int     *out_fd,
+                                                     guint16 *out_port,
+                                                     GError **error);
+
+static void     detach_listener_rendezvous          (nw_listener_t    listener,
+                                                     dispatch_queue_t queue);
+static gboolean dial_loopback_tcp                   (guint16  port,
+                                                     int     *out_fd,
+                                                     GError **error);
+static gboolean dial_loopback_udp                   (guint16  port,
+                                                     int     *out_fd,
+                                                     GError **error);
+
+static gboolean start_public_bridge                 (GTlsConnectionApple  *self,
+                                                     GError              **error);
+static void     stop_public_bridge                  (GTlsConnectionApple  *self);
+static gboolean extract_base_fd                     (GTlsConnectionApple  *self,
+                                                     int                  *out_fd,
+                                                     GError              **error);
+
+static BridgePump *bridge_pump_new                  (int               src_fd,
+                                                     int               dst_fd,
+                                                     gboolean          is_datagram,
+                                                     dispatch_queue_t  queue);
+static void     bridge_pump_start                   (BridgePump *pump);
+static void     bridge_pump_cancel                  (BridgePump *pump);
+static void     bridge_pump_handle_readable         (BridgePump *pump);
+static void     bridge_pump_drain                   (BridgePump *pump);
+static void     bridge_pump_handle_writable         (BridgePump *pump);
+static void     bridge_pump_handle_source_cancelled (BridgePump        *pump,
+                                                     dispatch_source_t  src);
+static void     bridge_pump_drain_pending           (BridgePump *pump);
+static void     bridge_pump_free                    (BridgePump *pump);
+
+static gboolean finalize_public_bridge              (GTlsConnectionApple  *self,
+                                                     GError              **error);
+static gboolean finalize_public_tls_bridge          (GTlsConnectionApple  *self,
+                                                     GError              **error);
+static gboolean finalize_public_dtls_bridge         (GTlsConnectionApple  *self,
+                                                     GError              **error);
+static gboolean wait_for_first_datagram             (int                   fd,
+                                                     struct sockaddr_in   *out_peer,
+                                                     GError              **error);
+static gboolean adopt_bounce_fd                     (GTlsConnectionApple  *self,
+                                                     int                   fd,
+                                                     gboolean              wrap_as_iostream,
+                                                     GError              **error);
+#endif
+static gboolean running_on_dispatch_queue (dispatch_queue_t queue);
+
 static GTlsCertificateApple *wrap_peer_chain (sec_protocol_metadata_t metadata);
 
 static void     publish_nw_state             (GTlsConnectionApple   *self,
@@ -264,6 +345,7 @@ static void     capture_negotiated_metadata_locked
 static GTlsProtocolVersion translate_protocol_version (tls_protocol_version_t version);
 static gchar   *format_ciphersuite           (tls_ciphersuite_t suite);
 
+#ifndef GIO_APPLE_PUBLIC_API_ONLY
 static void     start_stream_bridge           (GTlsConnectionApple *self);
 static void     stop_stream_bridge            (GTlsConnectionApple *self);
 static StreamPump *stream_pump_new           (GMainContext   *context,
@@ -301,6 +383,7 @@ static gboolean datagram_pump_on_source_ready (GDatagramBased *datagram_based,
 static gboolean datagram_pump_on_sink_ready   (GDatagramBased *datagram_based,
                                                GIOCondition    condition,
                                                gpointer        user_data);
+#endif
 
 static GError  *error_from_nw_error          (nw_error_t   nw_error,
                                               const gchar *default_message);
@@ -319,6 +402,18 @@ G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE (GTlsConnectionApple, g_tls_connection_apple
                                      G_TYPE_TLS_CONNECTION_BASE)
 
 #define PRIV(self) ((GTlsConnectionApplePrivate *) g_tls_connection_apple_get_instance_private (self))
+
+static const void *queue_marker_key = &queue_marker_key;
+
+static GSourceFuncs apple_base_source_funcs =
+{
+  apple_base_source_prepare,
+  apple_base_source_check,
+  apple_base_source_dispatch,
+  apple_base_source_finalize,
+  NULL,
+  NULL,
+};
 
 static void
 g_tls_connection_apple_class_init (GTlsConnectionAppleClass *klass)
@@ -349,12 +444,14 @@ g_tls_connection_apple_init (GTlsConnectionApple *self)
   GTlsConnectionApplePrivate *priv = PRIV (self);
 
   priv->queue = dispatch_queue_create ("gio-apple-tls", DISPATCH_QUEUE_SERIAL);
+  dispatch_queue_set_specific (priv->queue, queue_marker_key, priv->queue, NULL);
   g_mutex_init (&priv->state_mutex);
   g_cond_init (&priv->state_cond);
   priv->state = STATE_INIT;
   priv->rx_queue = g_queue_new ();
   priv->wakeup_source = wakeup_source_new ();
   priv->bounce_fd = -1;
+  priv->public_listen_fd = -1;
   g_mutex_init (&priv->base_sources_mutex);
 }
 
@@ -371,12 +468,29 @@ g_tls_connection_apple_dispose (GObject *object)
   if (priv->connection != NULL)
     nw_connection_cancel (priv->connection);
 
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+  stop_public_bridge (self);
+#else
   stop_datagram_bridge (self);
   stop_stream_bridge (self);
+#endif
 
   g_clear_object (&priv->bounce_ostream);
   g_clear_object (&priv->bounce_istream);
   g_clear_object (&priv->bounce_socket);
+
+  if (priv->public_listen_fd >= 0)
+    {
+      close (priv->public_listen_fd);
+      priv->public_listen_fd = -1;
+    }
+
+  if (priv->public_listener != NULL)
+    {
+      nw_listener_cancel (priv->public_listener);
+      nw_release (priv->public_listener);
+      priv->public_listener = NULL;
+    }
 
   g_clear_object (&priv->io_cancellable);
   g_clear_pointer (&priv->bridge_context, g_main_context_unref);
@@ -448,6 +562,10 @@ g_tls_connection_apple_handshake_thread_handshake (GTlsConnectionBase   *tls,
           priv->verify_accepted = accepted;
           priv->verify_pending = FALSE;
           g_clear_pointer (&priv->verify_trust, nw_release);
+          if (!accepted)
+            fail_locked (priv,
+                g_error_new_literal (G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE,
+                                     _("Unacceptable TLS certificate")));
           g_cond_broadcast (&priv->state_cond);
           continue;
         }
@@ -1073,6 +1191,7 @@ g_tls_connection_apple_close_fn (GTlsConnectionBase   *tls,
   GTlsConnectionApple *self = G_TLS_CONNECTION_APPLE (tls);
   GTlsConnectionApplePrivate *priv = PRIV (self);
   gint64 deadline = deadline_from_timeout (timeout);
+  gboolean on_queue = running_on_dispatch_queue (priv->queue);
 
   g_mutex_lock (&priv->state_mutex);
 
@@ -1082,14 +1201,41 @@ g_tls_connection_apple_close_fn (GTlsConnectionBase   *tls,
         break;
     }
 
+  if (!on_queue && priv->connection != NULL && priv->state == STATE_READY)
+    {
+      nw_connection_t connection = priv->connection;
+      dispatch_semaphore_t flush_sem = dispatch_semaphore_create (0);
+      dispatch_retain (flush_sem);
+      nw_connection_send (connection, NULL, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true,
+          ^(nw_error_t error) {
+            dispatch_semaphore_signal (flush_sem);
+            dispatch_release (flush_sem);
+          });
+      g_mutex_unlock (&priv->state_mutex);
+      if (dispatch_semaphore_wait (flush_sem,
+              dispatch_time (DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC)) != 0)
+        {
+          nw_connection_cancel (connection);
+          dispatch_semaphore_wait (flush_sem, DISPATCH_TIME_FOREVER);
+        }
+      dispatch_release (flush_sem);
+      g_mutex_lock (&priv->state_mutex);
+    }
+
   if (priv->connection != NULL && priv->state != STATE_CLOSED)
     nw_connection_cancel (priv->connection);
 
-  g_mutex_unlock (&priv->state_mutex);
+  if (!on_queue)
+    {
+      gint64 cancel_deadline = g_get_monotonic_time () + 500 * G_TIME_SPAN_MILLISECOND;
 
-  dispatch_sync (priv->queue, ^{});
+      while (priv->state != STATE_CLOSED && priv->state != STATE_FAILED)
+        {
+          if (!g_cond_wait_until (&priv->state_cond, &priv->state_mutex, cancel_deadline))
+            break;
+        }
+    }
 
-  g_mutex_lock (&priv->state_mutex);
   priv->state = STATE_CLOSED;
   g_cond_broadcast (&priv->state_cond);
   g_mutex_unlock (&priv->state_mutex);
@@ -1097,9 +1243,14 @@ g_tls_connection_apple_close_fn (GTlsConnectionBase   *tls,
   g_clear_pointer (&priv->connection, nw_release);
 
   g_cancellable_cancel (priv->io_cancellable);
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+  stop_public_bridge (self);
+#else
   stop_stream_bridge (self);
   stop_datagram_bridge (self);
+#endif
   wake_up_wakeup_source (priv);
+  wake_up_base_sources (priv);
 
   return G_TLS_CONNECTION_BASE_OK;
 }
@@ -1140,6 +1291,7 @@ g_tls_connection_apple_create_base_source (GTlsConnectionBase *tls,
 
   source = g_source_new (&apple_base_source_funcs, sizeof (AppleBaseSource));
   g_source_set_static_name (source, "GTlsConnectionApple base source");
+  g_source_set_dispose_function (source, apple_base_source_dispose);
   s = (AppleBaseSource *) source;
   s->tls = g_object_ref (self);
   s->condition = condition;
@@ -1165,6 +1317,8 @@ apple_base_source_prepare (GSource *source, gint *timeout)
   AppleBaseSource *s = (AppleBaseSource *) source;
   gboolean ready;
 
+  apple_base_source_cache_context (s);
+
   ready = g_tls_connection_apple_base_check (G_TLS_CONNECTION_BASE (s->tls), s->condition);
   *timeout = ready ? 0 : -1;
   return ready;
@@ -1174,6 +1328,9 @@ static gboolean
 apple_base_source_check (GSource *source)
 {
   AppleBaseSource *s = (AppleBaseSource *) source;
+
+  apple_base_source_cache_context (s);
+
   return g_tls_connection_apple_base_check (G_TLS_CONNECTION_BASE (s->tls), s->condition);
 }
 
@@ -1186,14 +1343,21 @@ apple_base_source_dispatch (GSource *source, GSourceFunc callback, gpointer user
 }
 
 static void
-apple_base_source_finalize (GSource *source)
+apple_base_source_dispose (GSource *source)
 {
   AppleBaseSource *s = (AppleBaseSource *) source;
   GTlsConnectionApplePrivate *priv = PRIV (s->tls);
 
   g_mutex_lock (&priv->base_sources_mutex);
   priv->base_sources = g_list_remove (priv->base_sources, s);
+  g_clear_pointer (&s->attached_context, g_main_context_unref);
   g_mutex_unlock (&priv->base_sources_mutex);
+}
+
+static void
+apple_base_source_finalize (GSource *source)
+{
+  AppleBaseSource *s = (AppleBaseSource *) source;
 
   g_object_unref (s->tls);
 }
@@ -1202,6 +1366,22 @@ static gboolean
 return_true (gpointer user_data)
 {
   return G_SOURCE_CONTINUE;
+}
+
+static void
+apple_base_source_cache_context (AppleBaseSource *s)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (s->tls);
+  GMainContext *ctx;
+
+  ctx = g_source_get_context (&s->source);
+  if (ctx == NULL)
+    return;
+
+  g_mutex_lock (&priv->base_sources_mutex);
+  if (s->attached_context == NULL)
+    s->attached_context = g_main_context_ref (ctx);
+  g_mutex_unlock (&priv->base_sources_mutex);
 }
 
 gboolean
@@ -1226,7 +1406,6 @@ g_tls_connection_apple_bind_base_iostream (GTlsConnectionApple *self,
   priv->base_output_pollable =
       G_IS_POLLABLE_OUTPUT_STREAM (output) &&
       g_pollable_output_stream_can_poll (G_POLLABLE_OUTPUT_STREAM (output));
-  priv->bridge_context = g_main_context_ref_thread_default ();
   priv->io_cancellable = g_cancellable_new ();
 
   return TRUE;
@@ -1241,7 +1420,6 @@ g_tls_connection_apple_bind_base_socket (GTlsConnectionApple *self,
 
   priv->is_dtls = TRUE;
   priv->base_socket = g_object_ref (base);
-  priv->bridge_context = g_main_context_ref_thread_default ();
   priv->io_cancellable = g_cancellable_new ();
 
   return TRUE;
@@ -1452,47 +1630,694 @@ g_tls_connection_apple_release_bounce_fd (GTlsConnectionApple *self,
   close (apple_fd);
 }
 
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+
+gboolean
+g_tls_connection_apple_setup_public_endpoint (GTlsConnectionApple  *self,
+                                              guint16              *out_port,
+                                              GError              **error)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+  gboolean result;
+
+  result = priv->is_dtls
+      ? setup_public_dtls_endpoint (self, out_port, error)
+      : setup_public_tls_endpoint (self, out_port, error);
+  if (result)
+    priv->public_endpoint_pending = TRUE;
+
+  return result;
+}
+
+static gboolean
+setup_public_tls_endpoint (GTlsConnectionApple  *self,
+                           guint16              *out_port,
+                           GError              **error)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+  int listen_fd;
+  guint16 port;
+
+  if (!make_tcp_loopback_listener (&listen_fd, &port, error))
+    return FALSE;
+
+  priv->public_listen_fd = listen_fd;
+  *out_port = port;
+  return TRUE;
+}
+
+static gboolean
+make_tcp_loopback_listener (int      *out_listen_fd,
+                            guint16  *out_port,
+                            GError  **error)
+{
+  int listen_fd = -1;
+  struct sockaddr_in addr = { 0 };
+  socklen_t addr_len = sizeof addr;
+
+  listen_fd = socket (AF_INET, SOCK_STREAM, 0);
+  if (listen_fd < 0)
+    goto syscall_fail;
+
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  if (bind (listen_fd, (struct sockaddr *) &addr, sizeof addr) < 0)
+    goto syscall_fail;
+  if (getsockname (listen_fd, (struct sockaddr *) &addr, &addr_len) < 0)
+    goto syscall_fail;
+  if (listen (listen_fd, 1) < 0)
+    goto syscall_fail;
+
+  *out_listen_fd = listen_fd;
+  *out_port = ntohs (addr.sin_port);
+  return TRUE;
+
+syscall_fail:
+  {
+    int saved = errno;
+    if (listen_fd >= 0) close (listen_fd);
+    g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved),
+                 "TCP loopback listener: %s", g_strerror (saved));
+    return FALSE;
+  }
+}
+
+static gboolean
+setup_public_dtls_endpoint (GTlsConnectionApple  *self,
+                            guint16              *out_port,
+                            GError              **error)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+  int udp_fd;
+  guint16 port;
+
+  if (!make_udp_loopback_local (&udp_fd, &port, error))
+    return FALSE;
+
+  priv->bounce_fd = udp_fd;
+  *out_port = port;
+  return TRUE;
+}
+
+static gboolean
+make_udp_loopback_local (int      *out_fd,
+                         guint16  *out_port,
+                         GError  **error)
+{
+  int fd = -1;
+  struct sockaddr_in addr = { 0 };
+  socklen_t addr_len = sizeof addr;
+
+  fd = socket (AF_INET, SOCK_DGRAM, 0);
+  if (fd < 0)
+    goto syscall_fail;
+
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+  addr.sin_port = 0;
+  if (bind (fd, (struct sockaddr *) &addr, sizeof addr) < 0)
+    goto syscall_fail;
+  if (getsockname (fd, (struct sockaddr *) &addr, &addr_len) < 0)
+    goto syscall_fail;
+
+  *out_fd = fd;
+  *out_port = ntohs (addr.sin_port);
+  return TRUE;
+
+syscall_fail:
+  {
+    int saved = errno;
+    if (fd >= 0) close (fd);
+    g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved),
+                 "UDP loopback local: %s", g_strerror (saved));
+    return FALSE;
+  }
+}
+
+nw_connection_t
+g_tls_connection_apple_listen_public_endpoint (GTlsConnectionApple *self,
+                                                nw_parameters_t      parameters,
+                                                GError             **error)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+  __block nw_listener_state_t listener_state = nw_listener_state_invalid;
+  __block bool                ready_signaled = false;
+  __block nw_connection_t     captured = NULL;
+  dispatch_semaphore_t        ready_sem;
+  dispatch_semaphore_t        new_conn_sem;
+  nw_listener_t               listener;
+  guint16                     listener_port;
+  int                         local_fd = -1;
+
+  ready_sem = dispatch_semaphore_create (0);
+  new_conn_sem = dispatch_semaphore_create (0);
+
+  listener = nw_listener_create_with_port ("0", parameters);
+  if (listener == NULL)
+    {
+      g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
+                           _("nw_listener_create_with_port returned NULL"));
+      goto release_sems;
+    }
+
+  nw_listener_set_state_changed_handler (listener,
+      ^(nw_listener_state_t state, nw_error_t err) {
+        listener_state = state;
+        if (!ready_signaled
+            && (state == nw_listener_state_ready
+                || state == nw_listener_state_failed
+                || state == nw_listener_state_cancelled))
+          {
+            ready_signaled = true;
+            dispatch_semaphore_signal (ready_sem);
+          }
+      });
+
+  nw_listener_set_new_connection_handler (listener,
+      ^(nw_connection_t connection) {
+        if (captured == NULL)
+          {
+            nw_retain (connection);
+            captured = connection;
+            dispatch_semaphore_signal (new_conn_sem);
+          }
+        else
+          nw_connection_cancel (connection);
+      });
+
+  nw_listener_set_queue (listener, priv->queue);
+  nw_listener_start (listener);
+
+  dispatch_semaphore_wait (ready_sem, DISPATCH_TIME_FOREVER);
+  if (listener_state != nw_listener_state_ready)
+    {
+      g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
+                           _("nw_listener never reached ready state"));
+      goto release_listener;
+    }
+
+  listener_port = nw_listener_get_port (listener);
+
+  if (priv->is_dtls
+      ? !dial_loopback_udp (listener_port, &local_fd, error)
+      : !dial_loopback_tcp (listener_port, &local_fd, error))
+    goto release_listener;
+
+  if (!adopt_bounce_fd (self, local_fd, !priv->is_dtls, error))
+    goto release_listener;
+
+  dispatch_semaphore_wait (new_conn_sem, DISPATCH_TIME_FOREVER);
+
+  detach_listener_rendezvous (listener, priv->queue);
+
+  priv->public_listener = listener;
+
+  dispatch_release (ready_sem);
+  dispatch_release (new_conn_sem);
+
+  return captured;
+
+release_listener:
+  detach_listener_rendezvous (listener, priv->queue);
+  nw_listener_cancel (listener);
+  dispatch_sync (priv->queue, ^{ });
+  nw_release (listener);
+
+release_sems:
+  dispatch_release (ready_sem);
+  dispatch_release (new_conn_sem);
+
+  return NULL;
+}
+
+static void
+detach_listener_rendezvous (nw_listener_t    listener,
+                            dispatch_queue_t queue)
+{
+  nw_listener_set_state_changed_handler (listener,
+      ^(nw_listener_state_t state, nw_error_t err) {
+      });
+  nw_listener_set_new_connection_handler (listener,
+      ^(nw_connection_t connection) {
+        nw_connection_cancel (connection);
+      });
+  dispatch_sync (queue, ^{ });
+}
+
+static gboolean
+dial_loopback_tcp (guint16  port,
+                   int     *out_fd,
+                   GError **error)
+{
+  int fd = -1;
+  struct sockaddr_in addr = { 0 };
+  int one = 1;
+
+  fd = socket (AF_INET, SOCK_STREAM, 0);
+  if (fd < 0)
+    goto syscall_fail;
+
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+  addr.sin_port = htons (port);
+  if (connect (fd, (struct sockaddr *) &addr, sizeof addr) < 0)
+    goto syscall_fail;
+
+  setsockopt (fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+
+  *out_fd = fd;
+  return TRUE;
+
+syscall_fail:
+  {
+    int saved = errno;
+    if (fd >= 0) close (fd);
+    g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved),
+                 "TCP loopback dial: %s", g_strerror (saved));
+    return FALSE;
+  }
+}
+
+static gboolean
+dial_loopback_udp (guint16  port,
+                   int     *out_fd,
+                   GError **error)
+{
+  int fd = -1;
+  struct sockaddr_in addr = { 0 };
+
+  fd = socket (AF_INET, SOCK_DGRAM, 0);
+  if (fd < 0)
+    goto syscall_fail;
+
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl (INADDR_LOOPBACK);
+  addr.sin_port = htons (port);
+  if (connect (fd, (struct sockaddr *) &addr, sizeof addr) < 0)
+    goto syscall_fail;
+
+  *out_fd = fd;
+  return TRUE;
+
+syscall_fail:
+  {
+    int saved = errno;
+    if (fd >= 0) close (fd);
+    g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved),
+                 "UDP loopback dial: %s", g_strerror (saved));
+    return FALSE;
+  }
+}
+
+static gboolean
+start_public_bridge (GTlsConnectionApple  *self,
+                     GError              **error)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+  int base_fd;
+
+  if (!extract_base_fd (self, &base_fd, error))
+    return FALSE;
+
+  fcntl (base_fd, F_SETFL, fcntl (base_fd, F_GETFL, 0) | O_NONBLOCK);
+  fcntl (priv->bounce_fd, F_SETFL, fcntl (priv->bounce_fd, F_GETFL, 0) | O_NONBLOCK);
+
+  priv->bridge_pump_forward = bridge_pump_new (base_fd, priv->bounce_fd, priv->is_dtls, priv->queue);
+  priv->bridge_pump_reverse = bridge_pump_new (priv->bounce_fd, base_fd, priv->is_dtls, priv->queue);
+
+  bridge_pump_start (priv->bridge_pump_forward);
+  bridge_pump_start (priv->bridge_pump_reverse);
+
+  return TRUE;
+}
+
+static void
+stop_public_bridge (GTlsConnectionApple *self)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+  BridgePump *forward = priv->bridge_pump_forward;
+  BridgePump *reverse = priv->bridge_pump_reverse;
+  void (^cancel_block) (void);
+
+  if (forward == NULL && reverse == NULL)
+    return;
+
+  priv->bridge_pump_forward = NULL;
+  priv->bridge_pump_reverse = NULL;
+
+  cancel_block = ^{
+    if (forward != NULL)
+      bridge_pump_cancel (forward);
+    if (reverse != NULL)
+      bridge_pump_cancel (reverse);
+  };
+
+  if (running_on_dispatch_queue (priv->queue))
+    cancel_block ();
+  else
+    dispatch_sync (priv->queue, cancel_block);
+}
+
+static gboolean
+extract_base_fd (GTlsConnectionApple  *self,
+                 int                  *out_fd,
+                 GError              **error)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+  GSocket *sock = NULL;
+
+  if (priv->is_dtls && G_IS_SOCKET (priv->base_socket))
+    sock = G_SOCKET (priv->base_socket);
+  else if (!priv->is_dtls && G_IS_SOCKET_CONNECTION (priv->base_iostream))
+    sock = g_socket_connection_get_socket (G_SOCKET_CONNECTION (priv->base_iostream));
+
+  if (sock == NULL)
+    {
+      g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
+                           _("Apple TLS public mode requires a socket-backed base stream"));
+      return FALSE;
+    }
+
+  *out_fd = g_socket_get_fd (sock);
+  return TRUE;
+}
+
+static BridgePump *
+bridge_pump_new (int               src_fd,
+                 int               dst_fd,
+                 gboolean          is_datagram,
+                 dispatch_queue_t  queue)
+{
+  BridgePump *pump = g_new0 (BridgePump, 1);
+
+  pump->src_fd = src_fd;
+  pump->dst_fd = dst_fd;
+  pump->is_datagram = is_datagram;
+  pump->queue = queue;
+  dispatch_retain (queue);
+  pump->buffer_capacity = TRANSFER_BUFFER_SIZE;
+  pump->buffer = g_malloc (pump->buffer_capacity);
+  pump->read_suspended = TRUE;
+
+  return pump;
+}
+
+static void
+bridge_pump_start (BridgePump *pump)
+{
+  dispatch_source_t read_src;
+
+  read_src = dispatch_source_create (DISPATCH_SOURCE_TYPE_READ,
+                                      (uintptr_t) pump->src_fd, 0, pump->queue);
+  pump->read_src = read_src;
+  pump->outstanding_sources++;
+  dispatch_source_set_event_handler (read_src, ^{
+      bridge_pump_handle_readable (pump);
+  });
+  dispatch_source_set_cancel_handler (read_src, ^{
+      bridge_pump_handle_source_cancelled (pump, read_src);
+  });
+  dispatch_resume (read_src);
+  pump->read_suspended = FALSE;
+}
+
+static void
+bridge_pump_cancel (BridgePump *pump)
+{
+  if (pump->stopping)
+    return;
+
+  bridge_pump_drain_pending (pump);
+
+  pump->stopping = TRUE;
+  pump->stopped = TRUE;
+
+  if (pump->read_src != NULL)
+    {
+      if (pump->read_suspended)
+        {
+          dispatch_resume (pump->read_src);
+          pump->read_suspended = FALSE;
+        }
+      dispatch_source_cancel (pump->read_src);
+    }
+  if (pump->write_src != NULL)
+    dispatch_source_cancel (pump->write_src);
+}
+
+static void
+bridge_pump_handle_readable (BridgePump *pump)
+{
+  ssize_t n;
+
+  if (pump->stopped)
+    return;
+
+  do
+    n = recv (pump->src_fd, pump->buffer, pump->buffer_capacity, 0);
+  while (n < 0 && errno == EINTR);
+
+  if (n == 0 && !pump->is_datagram)
+    {
+      pump->stopped = TRUE;
+      dispatch_suspend (pump->read_src);
+      pump->read_suspended = TRUE;
+      shutdown (pump->dst_fd, SHUT_WR);
+      return;
+    }
+  if (n < 0)
+    {
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        return;
+      pump->stopped = TRUE;
+      dispatch_suspend (pump->read_src);
+      pump->read_suspended = TRUE;
+      return;
+    }
+
+  pump->buffer_offset = 0;
+  pump->buffer_length = (gsize) n;
+
+  dispatch_suspend (pump->read_src);
+  pump->read_suspended = TRUE;
+
+  bridge_pump_drain (pump);
+}
+
+static void
+bridge_pump_drain (BridgePump *pump)
+{
+  while (pump->buffer_offset < pump->buffer_length)
+    {
+      ssize_t n;
+
+      do
+        n = send (pump->dst_fd, pump->buffer + pump->buffer_offset,
+                  pump->buffer_length - pump->buffer_offset, 0);
+      while (n < 0 && errno == EINTR);
+
+      if (n >= 0)
+        {
+          pump->buffer_offset += (gsize) n;
+          continue;
+        }
+      if (errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+          if (pump->write_src == NULL)
+            {
+              dispatch_source_t write_src = dispatch_source_create (DISPATCH_SOURCE_TYPE_WRITE,
+                                                                     (uintptr_t) pump->dst_fd, 0, pump->queue);
+              pump->write_src = write_src;
+              pump->outstanding_sources++;
+              dispatch_source_set_event_handler (write_src, ^{
+                  bridge_pump_handle_writable (pump);
+              });
+              dispatch_source_set_cancel_handler (write_src, ^{
+                  bridge_pump_handle_source_cancelled (pump, write_src);
+              });
+              dispatch_resume (write_src);
+            }
+          return;
+        }
+      pump->stopped = TRUE;
+      return;
+    }
+
+  pump->buffer_offset = 0;
+  pump->buffer_length = 0;
+
+  if (pump->write_src != NULL)
+    {
+      dispatch_source_cancel (pump->write_src);
+      pump->write_src = NULL;
+    }
+
+  if (!pump->stopped && pump->read_suspended)
+    {
+      dispatch_resume (pump->read_src);
+      pump->read_suspended = FALSE;
+    }
+}
+
+static void
+bridge_pump_handle_writable (BridgePump *pump)
+{
+  if (pump->stopped)
+    return;
+  bridge_pump_drain (pump);
+}
+
+static void
+bridge_pump_handle_source_cancelled (BridgePump        *pump,
+                                     dispatch_source_t  src)
+{
+  dispatch_release (src);
+  pump->outstanding_sources--;
+  if (pump->stopping && pump->outstanding_sources == 0)
+    bridge_pump_free (pump);
+}
+
+static void
+bridge_pump_drain_pending (BridgePump *pump)
+{
+  gint64 deadline;
+
+  if (pump->stopped || pump->is_datagram)
+    return;
+
+  deadline = g_get_monotonic_time () + 250 * G_TIME_SPAN_MILLISECOND;
+
+  while (TRUE)
+    {
+      ssize_t n;
+
+      if (pump->buffer_offset == pump->buffer_length)
+        {
+          struct pollfd pfd = { pump->src_fd, POLLIN, 0 };
+          gint64 remaining_us = deadline - g_get_monotonic_time ();
+          int poll_timeout_ms = (remaining_us > 0) ? (int) (remaining_us / 1000) : 0;
+          int pr;
+
+          do
+            pr = poll (&pfd, 1, poll_timeout_ms);
+          while (pr < 0 && errno == EINTR);
+          if (pr <= 0)
+            return;
+
+          do
+            n = recv (pump->src_fd, pump->buffer, pump->buffer_capacity, MSG_DONTWAIT);
+          while (n < 0 && errno == EINTR);
+
+          if (n <= 0)
+            {
+              if (n == 0)
+                shutdown (pump->dst_fd, SHUT_WR);
+              return;
+            }
+
+          pump->buffer_offset = 0;
+          pump->buffer_length = (gsize) n;
+        }
+
+      while (pump->buffer_offset < pump->buffer_length)
+        {
+          do
+            n = send (pump->dst_fd, pump->buffer + pump->buffer_offset,
+                      pump->buffer_length - pump->buffer_offset, MSG_DONTWAIT);
+          while (n < 0 && errno == EINTR);
+
+          if (n < 0)
+            return;
+          pump->buffer_offset += (gsize) n;
+        }
+    }
+}
+
+static void
+bridge_pump_free (BridgePump *pump)
+{
+  dispatch_release (pump->queue);
+  g_free (pump->buffer);
+  g_free (pump);
+}
+
+#endif /* GIO_APPLE_PUBLIC_API_ONLY */
+
+static gboolean
+running_on_dispatch_queue (dispatch_queue_t queue)
+{
+  return dispatch_get_specific (queue_marker_key) == queue;
+}
+
+GWeakRef *
+g_tls_connection_apple_get_weak_self (GTlsConnectionApple *self)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+
+  if (priv->weak_self == NULL)
+    {
+      priv->weak_self = g_new0 (GWeakRef, 1);
+      g_weak_ref_init (priv->weak_self, self);
+    }
+
+  return priv->weak_self;
+}
+
 void
 g_tls_connection_apple_install_verify_block (GTlsConnectionApple   *self,
                                               sec_protocol_options_t options)
 {
-  GTlsConnectionApplePrivate *priv = PRIV (self);
+  GWeakRef *weak_self = g_tls_connection_apple_get_weak_self (self);
 
   sec_protocol_options_set_verify_block (options,
       ^(sec_protocol_metadata_t metadata,
         sec_trust_t             trust,
         sec_protocol_verify_complete_t complete) {
-        GTlsCertificateApple *chain = wrap_peer_chain (metadata);
+        GTlsConnectionApple *strong_self = g_weak_ref_get (weak_self);
+        GTlsConnectionApplePrivate *strong_priv;
+        GTlsCertificateApple *chain;
         gboolean accepted;
 
-        g_mutex_lock (&priv->state_mutex);
-        g_clear_object (&priv->peer_cert);
-        priv->peer_cert = chain;
-
-        g_clear_pointer (&priv->verify_trust, nw_release);
-        priv->verify_trust = trust;
-        nw_retain (priv->verify_trust);
-        priv->verify_pending = TRUE;
-        g_cond_broadcast (&priv->state_cond);
-
-        while (priv->verify_pending &&
-               priv->state != STATE_FAILED &&
-               priv->state != STATE_CLOSED)
-          g_cond_wait (&priv->state_cond, &priv->state_mutex);
-
-        if (priv->verify_pending)
+        if (strong_self == NULL)
           {
-            priv->verify_pending = FALSE;
-            priv->verify_accepted = FALSE;
-            g_clear_pointer (&priv->verify_trust, nw_release);
+            complete (FALSE);
+            return;
           }
 
-        accepted = priv->verify_accepted;
-        g_mutex_unlock (&priv->state_mutex);
+        strong_priv = PRIV (strong_self);
+        chain = wrap_peer_chain (metadata);
+
+        g_mutex_lock (&strong_priv->state_mutex);
+        g_clear_object (&strong_priv->peer_cert);
+        strong_priv->peer_cert = chain;
+
+        g_clear_pointer (&strong_priv->verify_trust, nw_release);
+        strong_priv->verify_trust = trust;
+        nw_retain (strong_priv->verify_trust);
+        strong_priv->verify_pending = TRUE;
+        g_cond_broadcast (&strong_priv->state_cond);
+
+        while (strong_priv->verify_pending &&
+               strong_priv->state != STATE_FAILED &&
+               strong_priv->state != STATE_CLOSED)
+          g_cond_wait (&strong_priv->state_cond, &strong_priv->state_mutex);
+
+        if (strong_priv->verify_pending)
+          {
+            strong_priv->verify_pending = FALSE;
+            strong_priv->verify_accepted = FALSE;
+            g_clear_pointer (&strong_priv->verify_trust, nw_release);
+          }
+
+        accepted = strong_priv->verify_accepted;
+        g_mutex_unlock (&strong_priv->state_mutex);
+
+        g_object_unref (strong_self);
 
         complete (accepted);
       },
-      priv->queue);
+      g_tls_connection_apple_get_queue (self));
 }
 
 static GTlsCertificateApple *
@@ -1544,46 +2369,68 @@ g_tls_connection_apple_attach (GTlsConnectionApple *self,
                                nw_connection_t      connection)
 {
   GTlsConnectionApplePrivate *priv = PRIV (self);
-  GWeakRef *weak_self;
+  GWeakRef *weak_self = g_tls_connection_apple_get_weak_self (self);
   nw_connection_t captured_connection;
 
   nw_retain (connection);
   priv->connection = connection;
   nw_connection_set_queue (connection, priv->queue);
 
-  weak_self = g_new0 (GWeakRef, 1);
-  g_weak_ref_init (weak_self, self);
   captured_connection = connection;
   nw_connection_set_state_changed_handler (connection,
       ^(nw_connection_state_t nw_state, nw_error_t nw_error) {
         GTlsConnectionApple *self = g_weak_ref_get (weak_self);
 
-        if (self == NULL)
+        if (self != NULL)
           {
-            if (nw_state == nw_connection_state_cancelled)
-              {
-                g_weak_ref_clear (weak_self);
-                g_free (weak_self);
-              }
-            return;
+            publish_nw_state (self, nw_state, nw_error);
+            if (nw_state == nw_connection_state_failed)
+              nw_connection_cancel (captured_connection);
+
+            g_object_unref (self);
           }
 
-        publish_nw_state (self, nw_state, nw_error);
-        if (nw_state == nw_connection_state_failed)
-          nw_connection_cancel (captured_connection);
-        else if (nw_state == nw_connection_state_cancelled)
+        if (nw_state == nw_connection_state_cancelled)
           {
             g_weak_ref_clear (weak_self);
             g_free (weak_self);
           }
-
-        g_object_unref (self);
       });
 
   g_mutex_lock (&priv->state_mutex);
   priv->state = STATE_HANDSHAKING;
   g_mutex_unlock (&priv->state_mutex);
 
+  nw_connection_start (connection);
+
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+  if (priv->public_endpoint_pending)
+    {
+      GError *finalize_error = NULL;
+
+      if (!finalize_public_bridge (self, &finalize_error))
+        {
+          g_mutex_lock (&priv->state_mutex);
+          fail_locked (priv, finalize_error);
+          g_mutex_unlock (&priv->state_mutex);
+          wake_up_wakeup_source (priv);
+          return;
+        }
+    }
+
+  if (priv->bounce_fd >= 0)
+    {
+      GError *bridge_error = NULL;
+
+      if (!start_public_bridge (self, &bridge_error))
+        {
+          g_mutex_lock (&priv->state_mutex);
+          fail_locked (priv, bridge_error);
+          g_mutex_unlock (&priv->state_mutex);
+          wake_up_wakeup_source (priv);
+        }
+    }
+#else
   if (priv->bounce_socket != NULL)
     {
       if (priv->is_dtls)
@@ -1591,9 +2438,131 @@ g_tls_connection_apple_attach (GTlsConnectionApple *self,
       else
         start_stream_bridge (self);
     }
-
-  nw_connection_start (connection);
+#endif
 }
+
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+
+static gboolean
+finalize_public_bridge (GTlsConnectionApple  *self,
+                        GError              **error)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+  gboolean result;
+
+  result = priv->is_dtls
+      ? finalize_public_dtls_bridge (self, error)
+      : finalize_public_tls_bridge (self, error);
+  if (result)
+    priv->public_endpoint_pending = FALSE;
+
+  return result;
+}
+
+static gboolean
+finalize_public_tls_bridge (GTlsConnectionApple  *self,
+                            GError              **error)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+  int our_fd;
+  int one = 1;
+
+  our_fd = accept (priv->public_listen_fd, NULL, NULL);
+  if (our_fd < 0)
+    {
+      int saved = errno;
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved),
+                   "accept on loopback listener: %s", g_strerror (saved));
+      return FALSE;
+    }
+
+  close (priv->public_listen_fd);
+  priv->public_listen_fd = -1;
+
+  setsockopt (our_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+
+  return adopt_bounce_fd (self, our_fd, TRUE, error);
+}
+
+static gboolean
+finalize_public_dtls_bridge (GTlsConnectionApple  *self,
+                             GError              **error)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+  struct sockaddr_in peer;
+
+  if (!wait_for_first_datagram (priv->bounce_fd, &peer, error))
+    return FALSE;
+
+  if (connect (priv->bounce_fd, (struct sockaddr *) &peer, sizeof peer) < 0)
+    {
+      int saved = errno;
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved),
+                   "connect bounce UDP fd to peer: %s", g_strerror (saved));
+      return FALSE;
+    }
+
+  return adopt_bounce_fd (self, priv->bounce_fd, FALSE, error);
+}
+
+static gboolean
+wait_for_first_datagram (int                  fd,
+                         struct sockaddr_in  *out_peer,
+                         GError             **error)
+{
+  guint8 probe;
+  socklen_t addr_len = sizeof *out_peer;
+  ssize_t n;
+
+  do
+    n = recvfrom (fd, &probe, sizeof probe, MSG_PEEK,
+                  (struct sockaddr *) out_peer, &addr_len);
+  while (n < 0 && errno == EINTR);
+
+  if (n < 0)
+    {
+      int saved = errno;
+      g_set_error (error, G_IO_ERROR, g_io_error_from_errno (saved),
+                   "peek for first datagram on loopback: %s", g_strerror (saved));
+      return FALSE;
+    }
+
+  return TRUE;
+}
+
+static gboolean
+adopt_bounce_fd (GTlsConnectionApple  *self,
+                 int                   fd,
+                 gboolean              wrap_as_iostream,
+                 GError              **error)
+{
+  GTlsConnectionApplePrivate *priv = PRIV (self);
+  GSocket *bounce_socket;
+  GSocketConnection *bounce_connection;
+
+  bounce_socket = g_socket_new_from_fd (fd, error);
+  if (bounce_socket == NULL)
+    {
+      close (fd);
+      return FALSE;
+    }
+  g_socket_set_blocking (bounce_socket, FALSE);
+
+  priv->bounce_fd = fd;
+  priv->bounce_socket = bounce_socket;
+
+  if (wrap_as_iostream)
+    {
+      bounce_connection = g_socket_connection_factory_create_connection (bounce_socket);
+      priv->bounce_istream = g_object_ref (g_io_stream_get_input_stream (G_IO_STREAM (bounce_connection)));
+      priv->bounce_ostream = g_object_ref (g_io_stream_get_output_stream (G_IO_STREAM (bounce_connection)));
+      g_object_unref (bounce_connection);
+    }
+
+  return TRUE;
+}
+
+#endif /* GIO_APPLE_PUBLIC_API_ONLY */
 
 static void
 publish_nw_state (GTlsConnectionApple   *self,
@@ -1701,6 +2670,8 @@ format_ciphersuite (tls_ciphersuite_t suite)
     default: return g_strdup_printf ("TLS_CIPHER_%04X", (unsigned) suite);
     }
 }
+
+#ifndef GIO_APPLE_PUBLIC_API_ONLY
 
 static void
 start_stream_bridge (GTlsConnectionApple *self)
@@ -2247,6 +3218,8 @@ datagram_pump_on_sink_ready (GDatagramBased *datagram_based,
   return G_SOURCE_REMOVE;
 }
 
+#endif /* !GIO_APPLE_PUBLIC_API_ONLY */
+
 nw_connection_t
 g_tls_connection_apple_get_nw_connection (GTlsConnectionApple *self)
 {
@@ -2341,7 +3314,11 @@ wake_up_base_sources (GTlsConnectionApplePrivate *priv)
 
   g_mutex_lock (&priv->base_sources_mutex);
   for (l = priv->base_sources; l != NULL; l = l->next)
-    g_source_set_ready_time ((GSource *) l->data, 0);
+    {
+      AppleBaseSource *s = l->data;
+      if (s->attached_context != NULL)
+        g_main_context_wakeup (s->attached_context);
+    }
   g_mutex_unlock (&priv->base_sources_mutex);
 }
 

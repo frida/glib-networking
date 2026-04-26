@@ -28,6 +28,11 @@ deps = [
   tlsbase_dep,
 ] + apple_frameworks
 
+apple_c_args = []
+if get_option('apple_api_surface') == 'public'
+  apple_c_args += '-DGIO_APPLE_PUBLIC_API_ONLY'
+endif
+
 giomodules += 'gioapple'
 
 module = shared_module(
@@ -35,6 +40,7 @@ module = shared_module(
   sources: sources,
   include_directories: incs,
   dependencies: deps,
+  c_args: apple_c_args,
   link_args: module_ldflags,
   link_depends: symbol_map,
   name_suffix: module_suffix,

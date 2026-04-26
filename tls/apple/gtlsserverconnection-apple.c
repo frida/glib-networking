@@ -17,9 +17,11 @@
 #include "gtlscertificate-apple.h"
 #include <glib/gi18n-lib.h>
 
+#ifndef GIO_APPLE_PUBLIC_API_ONLY
 extern nw_connection_t nw_connection_create_with_connected_socket_and_parameters (int fd, nw_parameters_t parameters);
 extern void            nw_parameters_set_allow_joining_connected_fd (nw_parameters_t parameters, bool allow);
 extern void            nw_parameters_set_server_mode (nw_parameters_t parameters, bool server_mode);
+#endif
 
 struct _GTlsServerConnectionApple
 {
@@ -129,11 +131,27 @@ g_tls_server_connection_apple_start_handshake (GTlsConnectionApple  *base_self,
         apply_server_tls_options (self, sec_opts);
         nw_release (sec_opts);
       };
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+  nw_parameters_configure_protocol_block_t configure_tcp =
+      ^(nw_protocol_options_t tcp_options) {
+        nw_tcp_options_set_no_delay (tcp_options, true);
+      };
+#else
+  nw_parameters_configure_protocol_block_t configure_tcp = NW_PARAMETERS_DEFAULT_CONFIGURATION;
+#endif
   nw_parameters_t parameters = is_dtls
       ? nw_parameters_create_secure_udp (configure_sec, NW_PARAMETERS_DEFAULT_CONFIGURATION)
-      : nw_parameters_create_secure_tcp (configure_sec, NW_PARAMETERS_DEFAULT_CONFIGURATION);
-  int apple_fd;
+      : nw_parameters_create_secure_tcp (configure_sec, configure_tcp);
   nw_connection_t connection;
+
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+  connection = g_tls_connection_apple_listen_public_endpoint (base_self, parameters, error);
+  nw_release (parameters);
+
+  if (connection == NULL)
+    return FALSE;
+#else
+  int apple_fd;
 
   nw_parameters_set_allow_joining_connected_fd (parameters, true);
   nw_parameters_set_server_mode (parameters, true);
@@ -148,13 +166,14 @@ g_tls_server_connection_apple_start_handshake (GTlsConnectionApple  *base_self,
   connection = nw_connection_create_with_connected_socket_and_parameters (apple_fd, parameters);
   nw_release (parameters);
 
-  if (!connection)
+  if (connection == NULL)
     {
       g_tls_connection_apple_release_bounce_fd (base_self, apple_fd);
       g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
                            _("nw_connection_create_with_connected_socket_and_parameters returned NULL"));
       return FALSE;
     }
+#endif
 
   g_tls_connection_apple_attach (base_self, connection);
   nw_release (connection);

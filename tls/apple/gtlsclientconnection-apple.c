@@ -17,8 +17,10 @@
 #include "gtlscertificate-apple.h"
 #include <glib/gi18n-lib.h>
 
+#ifndef GIO_APPLE_PUBLIC_API_ONLY
 extern nw_connection_t nw_connection_create_with_connected_socket_and_parameters (int fd, nw_parameters_t parameters);
 extern void            nw_parameters_set_allow_joining_connected_fd (nw_parameters_t parameters, bool allow);
+#endif
 
 struct _GTlsClientConnectionApple
 {
@@ -184,11 +186,45 @@ g_tls_client_connection_apple_start_handshake (GTlsConnectionApple  *base_self,
         apply_tls_options (self, sec_opts);
         nw_release (sec_opts);
       };
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+  nw_parameters_configure_protocol_block_t configure_tcp =
+      ^(nw_protocol_options_t tcp_options) {
+        nw_tcp_options_set_no_delay (tcp_options, true);
+      };
+#else
+  nw_parameters_configure_protocol_block_t configure_tcp = NW_PARAMETERS_DEFAULT_CONFIGURATION;
+#endif
   nw_parameters_t parameters = is_dtls
       ? nw_parameters_create_secure_udp (configure_sec, NW_PARAMETERS_DEFAULT_CONFIGURATION)
-      : nw_parameters_create_secure_tcp (configure_sec, NW_PARAMETERS_DEFAULT_CONFIGURATION);
-  int apple_fd;
+      : nw_parameters_create_secure_tcp (configure_sec, configure_tcp);
   nw_connection_t connection;
+
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+  guint16 apple_port;
+  gchar port_str[8];
+  nw_endpoint_t endpoint;
+
+  if (!g_tls_connection_apple_setup_public_endpoint (base_self, &apple_port, error))
+    {
+      nw_release (parameters);
+      return FALSE;
+    }
+
+  g_snprintf (port_str, sizeof port_str, "%u", apple_port);
+  endpoint = nw_endpoint_create_host ("127.0.0.1", port_str);
+
+  connection = nw_connection_create (endpoint, parameters);
+  nw_release (endpoint);
+  nw_release (parameters);
+
+  if (connection == NULL)
+    {
+      g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
+                           _("nw_connection_create returned NULL"));
+      return FALSE;
+    }
+#else
+  int apple_fd;
 
   nw_parameters_set_allow_joining_connected_fd (parameters, true);
 
@@ -202,13 +238,14 @@ g_tls_client_connection_apple_start_handshake (GTlsConnectionApple  *base_self,
   connection = nw_connection_create_with_connected_socket_and_parameters (apple_fd, parameters);
   nw_release (parameters);
 
-  if (!connection)
+  if (connection == NULL)
     {
       g_tls_connection_apple_release_bounce_fd (base_self, apple_fd);
       g_set_error_literal (error, G_TLS_ERROR, G_TLS_ERROR_MISC,
                            _("nw_connection_create_with_connected_socket_and_parameters returned NULL"));
       return FALSE;
     }
+#endif
 
   g_tls_connection_apple_attach (base_self, connection);
   nw_release (connection);
@@ -246,13 +283,22 @@ static void
 install_client_challenge_block (GTlsClientConnectionApple *self,
                                 sec_protocol_options_t     options)
 {
+  GWeakRef *weak_self =
+      g_tls_connection_apple_get_weak_self (G_TLS_CONNECTION_APPLE (self));
+
   sec_protocol_options_set_challenge_block (options,
       ^(sec_protocol_metadata_t metadata,
         sec_protocol_challenge_complete_t complete) {
-        sec_identity_t identity;
+        GTlsClientConnectionApple *strong_self = g_weak_ref_get (weak_self);
+        sec_identity_t identity = NULL;
 
-        capture_accepted_cas_from_metadata (self, metadata);
-        identity = copy_local_sec_identity (self);
+        if (strong_self != NULL)
+          {
+            capture_accepted_cas_from_metadata (strong_self, metadata);
+            identity = copy_local_sec_identity (strong_self);
+            g_object_unref (strong_self);
+          }
+
         complete (identity);
         g_clear_pointer (&identity, nw_release);
       },

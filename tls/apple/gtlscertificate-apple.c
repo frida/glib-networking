@@ -22,6 +22,7 @@
 
 #include <glib/gi18n-lib.h>
 
+#ifndef GIO_APPLE_PUBLIC_API_ONLY
 /*
  * Not declared in Security/SecItem.h, but exported from
  * Security.framework since macOS 14 / iOS 17. SecKeyCreateWithData
@@ -30,6 +31,7 @@
  */
 extern const CFStringRef kSecAttrKeyTypeEd25519
     API_AVAILABLE(macos(14.0), ios(17.0), tvos(17.0), watchos(10.0));
+#endif
 
 struct _GTlsCertificateApple
 {
@@ -115,8 +117,10 @@ static SecKeyRef         key_from_rsa_pkcs1           (const guint8 *der,
                                                        gsize         len);
 static SecKeyRef         key_from_ec_sec1             (const guint8 *der,
                                                        gsize         len);
+#ifndef GIO_APPLE_PUBLIC_API_ONLY
 static SecKeyRef         key_from_ed25519_curve       (const guint8 *der,
                                                        gsize         len);
+#endif
 static Pkcs8Algo         extract_pkcs8_private_key    (const guint8  *der,
                                                        gsize          len,
                                                        const guint8 **out_inner,
@@ -528,7 +532,11 @@ key_from_der (const guint8 *der,
     case PKCS8_ALGO_EC:
       return key_from_ec_sec1 (inner, inner_len);
     case PKCS8_ALGO_ED25519:
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+      return NULL;
+#else
       return key_from_ed25519_curve (inner, inner_len);
+#endif
     case PKCS8_ALGO_UNKNOWN:
     default:
       return key_from_rsa_pkcs1 (der, len);
@@ -635,6 +643,7 @@ key_from_ec_sec1 (const guint8 *der,
   return key;
 }
 
+#ifndef GIO_APPLE_PUBLIC_API_ONLY
 static SecKeyRef
 key_from_ed25519_curve (const guint8 *der,
                         gsize         len)
@@ -670,6 +679,7 @@ key_from_ed25519_curve (const guint8 *der,
 
   return key;
 }
+#endif
 
 static Pkcs8Algo
 extract_pkcs8_private_key (const guint8  *der,
@@ -890,7 +900,11 @@ export_private_key_pkcs8 (SecKeyRef key)
   key_type = CFDictionaryGetValue (attrs, kSecAttrKeyType);
   is_rsa     = key_type != NULL && CFEqual (key_type, kSecAttrKeyTypeRSA);
   is_ec      = key_type != NULL && CFEqual (key_type, kSecAttrKeyTypeECSECPrimeRandom);
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+  is_ed25519 = FALSE;
+#else
   is_ed25519 = key_type != NULL && CFEqual (key_type, kSecAttrKeyTypeEd25519);
+#endif
   size_in_bits_ref = CFDictionaryGetValue (attrs, kSecAttrKeySizeInBits);
   if (size_in_bits_ref != NULL)
     CFNumberGetValue (size_in_bits_ref, kCFNumberIntType, &key_size_bits);
