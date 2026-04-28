@@ -29,7 +29,7 @@ struct _GTlsClientConnectionApple
   GTlsCertificateFlags validation_flags;
   GSocketConnectable *server_identity;
   gboolean use_ssl3;
-  GList *accepted_cas;
+  GPtrArray *accepted_cas;
   gchar **alpn_protocols;
 };
 
@@ -106,7 +106,7 @@ g_tls_client_connection_apple_dispose (GObject *object)
 {
   GTlsClientConnectionApple *self = G_TLS_CLIENT_CONNECTION_APPLE (object);
 
-  g_list_free_full (g_steal_pointer (&self->accepted_cas), (GDestroyNotify) g_byte_array_unref);
+  g_clear_pointer (&self->accepted_cas, g_ptr_array_unref);
   g_clear_object (&self->server_identity);
 
   G_OBJECT_CLASS (g_tls_client_connection_apple_parent_class)->dispose (object);
@@ -129,6 +129,8 @@ g_tls_client_connection_apple_get_property (GObject    *object,
                                             GParamSpec *pspec)
 {
   GTlsClientConnectionApple *self = G_TLS_CLIENT_CONNECTION_APPLE (object);
+  GList *accepted_cas;
+  guint i;
 
   switch (prop_id)
     {
@@ -142,7 +144,17 @@ g_tls_client_connection_apple_get_property (GObject    *object,
       g_value_set_boolean (value, self->use_ssl3);
       break;
     case PROP_ACCEPTED_CAS:
-      g_value_set_pointer (value, self->accepted_cas);
+      accepted_cas = NULL;
+      if (self->accepted_cas != NULL)
+        {
+          for (i = 0; i != self->accepted_cas->len; i++)
+            {
+              accepted_cas = g_list_prepend (accepted_cas,
+                  g_byte_array_ref (g_ptr_array_index (self->accepted_cas, i)));
+            }
+          accepted_cas = g_list_reverse (accepted_cas);
+        }
+      g_value_set_pointer (value, accepted_cas);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -309,7 +321,7 @@ static void
 capture_accepted_cas_from_metadata (GTlsClientConnectionApple *self,
                                     sec_protocol_metadata_t    metadata)
 {
-  __block GList *cas = NULL;
+  GPtrArray *cas = g_ptr_array_new_with_free_func ((GDestroyNotify) g_byte_array_unref);
 
   sec_protocol_metadata_access_distinguished_names (metadata,
       ^(dispatch_data_t name_data) {
@@ -319,11 +331,10 @@ capture_accepted_cas_from_metadata (GTlsClientConnectionApple *self,
               g_byte_array_append (ba, bytes, size);
               return true;
             });
-        cas = g_list_prepend (cas, ba);
+        g_ptr_array_add (cas, ba);
       });
-  cas = g_list_reverse (cas);
 
-  g_list_free_full (self->accepted_cas, (GDestroyNotify) g_byte_array_unref);
+  g_clear_pointer (&self->accepted_cas, g_ptr_array_unref);
   self->accepted_cas = cas;
   g_object_notify (G_OBJECT (self), "accepted-cas");
 }
