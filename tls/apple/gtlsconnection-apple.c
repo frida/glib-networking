@@ -2586,8 +2586,11 @@ publish_nw_state (GTlsConnectionApple   *self,
     case nw_connection_state_cancelled:
       priv->state = STATE_CLOSED;
       break;
-    case nw_connection_state_invalid:
     case nw_connection_state_waiting:
+      if (nw_error != NULL)
+        fail_locked (priv, error_from_nw_error (nw_error, _("TLS handshake failed")));
+      break;
+    case nw_connection_state_invalid:
     case nw_connection_state_preparing:
     default:
       break;
