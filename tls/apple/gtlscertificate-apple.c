@@ -40,6 +40,7 @@ struct _GTlsCertificateApple
   SecCertificateRef cert;
   SecKeyRef         private_key;
   SecIdentityRef    identity;
+  GByteArray       *pkcs8_for_pkcs12_import;
 
   GTlsCertificateApple *issuer;
 
@@ -191,10 +192,16 @@ static gboolean          parse_pkcs7_data_body        (const guint8  *der,
                                                        const guint8 **out_body,
                                                        gsize         *out_body_len);
 
+static gboolean          assign_private_key_from_der  (GTlsCertificateApple *self,
+                                                       const guint8         *der,
+                                                       gsize                 der_len,
+                                                       const gchar          *pem_label);
 static SecIdentityRef    synthesize_identity          (SecCertificateRef cert,
-                                                       SecKeyRef         key);
+                                                       const guint8     *pkcs8,
+                                                       gsize             pkcs8_len);
 static GByteArray       *build_pkcs12                 (SecCertificateRef cert,
-                                                       SecKeyRef         key,
+                                                       const guint8     *pkcs8,
+                                                       gsize             pkcs8_len,
                                                        const gchar      *password);
 static GByteArray       *build_safe_bag               (const guint8 *bag_id,
                                                        gsize         bag_id_len,
@@ -266,6 +273,7 @@ g_tls_certificate_apple_dispose (GObject *object)
   GTlsCertificateApple *self = G_TLS_CERTIFICATE_APPLE (object);
 
   g_clear_pointer (&self->pkcs12_data, g_byte_array_unref);
+  g_clear_pointer (&self->pkcs8_for_pkcs12_import, g_byte_array_unref);
   g_clear_object (&self->issuer);
   g_clear_pointer (&self->identity, CFRelease);
   g_clear_pointer (&self->private_key, CFRelease);
@@ -356,8 +364,7 @@ g_tls_certificate_apple_set_property (GObject      *object,
       ba = g_value_get_boxed (value);
       if (ba && !self->have_key)
         {
-          self->private_key = key_from_der (ba->data, ba->len, NULL);
-          if (!self->private_key)
+          if (!assign_private_key_from_der (self, ba->data, ba->len, NULL))
             {
               g_clear_error (&self->construct_error);
               g_set_error_literal (&self->construct_error,
@@ -391,16 +398,16 @@ g_tls_certificate_apple_set_property (GObject      *object,
                                    _("Could not parse PEM private key"));
               break;
             }
-          self->private_key = key_from_der (der, der_len, label);
-          g_free (der);
-          if (!self->private_key)
+          if (!assign_private_key_from_der (self, der, der_len, label))
             {
+              g_free (der);
               g_clear_error (&self->construct_error);
               g_set_error_literal (&self->construct_error,
                                    G_TLS_ERROR, G_TLS_ERROR_BAD_CERTIFICATE,
                                    _("PEM private-key payload was not valid DER"));
               break;
             }
+          g_free (der);
           self->have_key = TRUE;
         }
       break;
@@ -509,6 +516,39 @@ pem_decode_block (const gchar *pem,
 
   *out_len = der_len;
   return der;
+}
+
+static gboolean
+assign_private_key_from_der (GTlsCertificateApple *self,
+                             const guint8         *der,
+                             gsize                 der_len,
+                             const gchar          *pem_label)
+{
+  SecKeyRef key;
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+  const guint8 *inner;
+  gsize inner_len;
+#endif
+
+  key = key_from_der (der, der_len, pem_label);
+  if (key)
+    {
+      self->private_key = key;
+      return TRUE;
+    }
+
+#ifdef GIO_APPLE_PUBLIC_API_ONLY
+  inner = NULL;
+  inner_len = 0;
+  if (extract_pkcs8_private_key (der, der_len, &inner, &inner_len) == PKCS8_ALGO_ED25519)
+    {
+      self->pkcs8_for_pkcs12_import = g_byte_array_new ();
+      g_byte_array_append (self->pkcs8_for_pkcs12_import, der, der_len);
+      return TRUE;
+    }
+#endif
+
+  return FALSE;
 }
 
 static SecKeyRef
@@ -808,7 +848,9 @@ g_tls_certificate_apple_get_property (GObject    *object,
       {
         GByteArray *pkcs8 = NULL;
 
-        if (self->private_key)
+        if (self->pkcs8_for_pkcs12_import)
+          pkcs8 = g_byte_array_ref (self->pkcs8_for_pkcs12_import);
+        else if (self->private_key)
           pkcs8 = export_private_key_pkcs8 (self->private_key);
 
         if (prop_id == PROP_PRIVATE_KEY)
@@ -2041,27 +2083,44 @@ g_tls_certificate_apple_get_private_key (GTlsCertificateApple *self)
 SecIdentityRef
 g_tls_certificate_apple_copy_identity (GTlsCertificateApple *self)
 {
+  GByteArray *exported_pkcs8;
+
   g_return_val_if_fail (G_IS_TLS_CERTIFICATE_APPLE (self), NULL);
 
   if (self->identity)
     return (SecIdentityRef) CFRetain (self->identity);
 
-  if (self->cert && self->private_key)
+  if (!self->cert)
+    return NULL;
+
+  if (self->pkcs8_for_pkcs12_import)
     {
-      self->identity = synthesize_identity (self->cert, self->private_key);
-      if (self->identity)
-        return (SecIdentityRef) CFRetain (self->identity);
+      self->identity = synthesize_identity (self->cert,
+                                            self->pkcs8_for_pkcs12_import->data,
+                                            self->pkcs8_for_pkcs12_import->len);
+    }
+  else if (self->private_key)
+    {
+      exported_pkcs8 = export_private_key_pkcs8 (self->private_key);
+      if (exported_pkcs8)
+        {
+          self->identity = synthesize_identity (self->cert,
+                                                exported_pkcs8->data,
+                                                exported_pkcs8->len);
+          g_byte_array_unref (exported_pkcs8);
+        }
     }
 
-  return NULL;
+  return self->identity ? (SecIdentityRef) CFRetain (self->identity) : NULL;
 }
 
 static SecIdentityRef
 synthesize_identity (SecCertificateRef cert,
-                     SecKeyRef         key)
+                     const guint8     *pkcs8,
+                     gsize             pkcs8_len)
 {
-  static const gchar transit_password[] = "pkcs12-synthesis";
   SecIdentityRef identity = NULL;
+  static const gchar transit_password[] = "pkcs12-synthesis";
   GByteArray *blob;
   CFDataRef data;
   CFStringRef password;
@@ -2070,8 +2129,10 @@ synthesize_identity (SecCertificateRef cert,
   CFDictionaryRef options;
   OSStatus status;
   CFArrayRef items = NULL;
+  CFDictionaryRef first;
+  SecIdentityRef ref;
 
-  blob = build_pkcs12 (cert, key, transit_password);
+  blob = build_pkcs12 (cert, pkcs8, pkcs8_len, transit_password);
   if (!blob)
     return NULL;
 
@@ -2096,8 +2157,8 @@ synthesize_identity (SecCertificateRef cert,
 
   if (status == errSecSuccess && items && CFArrayGetCount (items) > 0)
     {
-      CFDictionaryRef first = CFArrayGetValueAtIndex (items, 0);
-      SecIdentityRef ref = (SecIdentityRef) CFDictionaryGetValue (first, kSecImportItemIdentity);
+      first = CFArrayGetValueAtIndex (items, 0);
+      ref = (SecIdentityRef) CFDictionaryGetValue (first, kSecImportItemIdentity);
       if (ref)
         identity = (SecIdentityRef) CFRetain (ref);
     }
@@ -2110,7 +2171,8 @@ synthesize_identity (SecCertificateRef cert,
 
 static GByteArray *
 build_pkcs12 (SecCertificateRef cert,
-              SecKeyRef         key,
+              const guint8     *pkcs8,
+              gsize             pkcs8_len,
               const gchar      *password)
 {
   static const guint8 oid_id_data[]           = { 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x01 };
@@ -2120,7 +2182,6 @@ build_pkcs12 (SecCertificateRef cert,
 
   GByteArray *pfx;
   CFDataRef cert_data;
-  GByteArray *pkcs8;
   GByteArray *cert_bag_value_inner;
   GByteArray *cert_bag_value;
   GByteArray *cert_safe_bag;
@@ -2139,13 +2200,6 @@ build_pkcs12 (SecCertificateRef cert,
   cert_data = SecCertificateCopyData (cert);
   if (!cert_data)
     return NULL;
-
-  pkcs8 = export_private_key_pkcs8 (key);
-  if (!pkcs8)
-    {
-      CFRelease (cert_data);
-      return NULL;
-    }
 
   cert_bag_value_inner = g_byte_array_new ();
   der_append_oid (cert_bag_value_inner, oid_x509_cert, sizeof oid_x509_cert);
@@ -2170,8 +2224,7 @@ build_pkcs12 (SecCertificateRef cert,
                                     local_key_id, sizeof local_key_id);
     g_byte_array_unref (cert_bag_value);
 
-    encrypted_key = encrypt_pkcs8_pbes2 (pkcs8->data, pkcs8->len, password);
-    g_byte_array_unref (pkcs8);
+    encrypted_key = encrypt_pkcs8_pbes2 (pkcs8, pkcs8_len, password);
     if (!encrypted_key)
       {
         g_byte_array_unref (cert_safe_bag);
